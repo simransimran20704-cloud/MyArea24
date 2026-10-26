@@ -344,7 +344,7 @@ def migrate_data(
     print("\n[*] Auditing post-migration target record counts...")
     discrepancies = []
     with target_engine.connect() as verify_conn:
-        for t, expected_count in src_counts.items():
+        for t, expected_count in migrated_counts.items():
             if t in Base.metadata.tables:
                 actual_count = verify_conn.execute(text(f'SELECT COUNT(*) FROM "{t}";')).scalar()
                 if actual_count != expected_count:
