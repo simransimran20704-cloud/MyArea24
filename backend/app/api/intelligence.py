@@ -777,8 +777,11 @@ async def get_air_quality_status(
                 from backend.app.integrations.openaq.client import OpenAQClient
 
                 oaq_client = OpenAQClient()
-                records = await oaq_client.fetch_latest_for_coordinates(
-                    target_lat, target_lon, radius_meters=int(max_dist * 1000)
+                records = await asyncio.wait_for(
+                    oaq_client.fetch_latest_for_coordinates(
+                        target_lat, target_lon, radius_meters=int(max_dist * 1000)
+                    ),
+                    timeout=3.5,
                 )
                 now_utc = datetime.datetime.utcnow()
                 for rec in records:

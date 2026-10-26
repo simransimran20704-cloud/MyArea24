@@ -16,3 +16,6 @@ myarea24.db*
 MyArea24-VisualGuide - Google Docs.pdf
 MyArea24_Pitch_Deck.pptx
 
+.neon
+api_audit_results.json
+audit_results.json

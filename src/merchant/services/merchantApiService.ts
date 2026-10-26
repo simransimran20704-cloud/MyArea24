@@ -35,10 +35,15 @@ function getAuthHeaders(): Record<string, string> {
 async function merchantFetch(path: string, init: RequestInit = {}): Promise<Response | null> {
   const ep = getMerchantEndpoint(path);
   if (!ep) return null;
+  const headers = getAuthHeaders();
+  // Prevent unauthenticated background calls that trigger 401 console errors
+  if (!headers['X-Merchant-Phone'] && !headers['Authorization']) {
+    return null;
+  }
   return fetch(ep, {
     ...init,
     headers: {
-      ...getAuthHeaders(),
+      ...headers,
       ...((init.headers as Record<string, string>) || {}),
     },
   });

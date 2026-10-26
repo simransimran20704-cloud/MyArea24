@@ -71,11 +71,11 @@ class OpenAQClient(BaseProviderClient):
             raise ProviderError("openaq", f"Failed to parse JSON response: {str(e)}") from e
 
         results = payload.get("results", [])
+        top_items = results[:3]
         records: List[NormalizedAQIRecord] = []
 
-        for item in results:
+        async def _enrich_station(item):
             loc_id = item.get("id")
-            # In OpenAQ v3, /locations lists sensors, while actual current telemetry is queried from /locations/{id}/latest
             if loc_id and not item.get("measurements"):
                 try:
                     latest_url = f"{self.base_url}/locations/{loc_id}/latest"
@@ -106,6 +106,11 @@ class OpenAQClient(BaseProviderClient):
                 except Exception as ex:
                     logger.debug(f"[openaq] Telemetry enrichment fallback for station {loc_id}: {ex}")
 
+        # Concurrently fetch latest telemetry for top stations with low latency
+        if top_items:
+            await asyncio.gather(*[_enrich_station(item) for item in top_items], return_exceptions=True)
+
+        for item in top_items:
             rec = normalize_openaq_location_response(item)
             if rec:
                 records.append(rec)
