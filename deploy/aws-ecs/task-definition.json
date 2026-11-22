@@ -1,0 +1,94 @@
+{
+  "family": "myarea24-backend-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/myarea24EcsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/myarea24EcsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "myarea24-backend",
+      "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/myarea24-backend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "hostPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8000/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      },
+      "environment": [
+        { "name": "APP_ENV", "value": "production" },
+        { "name": "APP_NAME", "value": "MyArea24" },
+        { "name": "DEBUG", "value": "false" },
+        { "name": "LOG_LEVEL", "value": "INFO" },
+        { "name": "PORT", "value": "8000" },
+        { "name": "WORKERS", "value": "2" },
+        { "name": "WEB_CONCURRENCY", "value": "2" },
+        { "name": "TIMEOUT", "value": "120" },
+        { "name": "ALLOWED_ORIGINS", "value": "https://myarea24.in,https://app.myarea24.in" },
+        { "name": "SMS_PROVIDER", "value": "auto" },
+        { "name": "SMS_SENDER_ID", "value": "MYAR24" },
+        { "name": "SMS_STRICT_PRODUCTION", "value": "false" },
+        { "name": "VAPID_PUBLIC_KEY", "value": "BA7XldkXdRawZgM1WzKjpCqCBSl8xAMh3PKO-SQuyNrHgXV9ACSkiSnDQcmVI25peq-nG0a6QviXHLKyZ2f8j8g" },
+        { "name": "VAPID_CLAIMS_SUB", "value": "mailto:support@myarea24.in" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:DATABASE_URL::"
+        },
+        {
+          "name": "JWT_SECRET_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:JWT_SECRET_KEY::"
+        },
+        {
+          "name": "VAPID_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:VAPID_PRIVATE_KEY::"
+        },
+        {
+          "name": "FAST2SMS_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:FAST2SMS_API_KEY::"
+        },
+        {
+          "name": "RAZORPAY_KEY_ID",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:RAZORPAY_KEY_ID::"
+        },
+        {
+          "name": "RAZORPAY_KEY_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:RAZORPAY_KEY_SECRET::"
+        },
+        {
+          "name": "RAZORPAY_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:RAZORPAY_WEBHOOK_SECRET::"
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:myarea24/production-credentials:GEMINI_API_KEY::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/myarea24-backend",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

@@ -21,7 +21,14 @@ import {
   KeyRound,
   Smartphone,
   ExternalLink,
+  Volume2,
+  Sun,
 } from 'lucide-react';
+import {
+  realtimeService,
+  WAKELOCK_STATUS_EVENT,
+  PUSH_SUBSCRIPTION_EVENT,
+} from '../../services/realtimeService';
 import {
   getMerchantSettings,
   updateMerchantSettings,
@@ -98,6 +105,31 @@ export function MerchantSettingsDashboard({
 
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isPushSubscribed, setIsPushSubscribed] = useState(false);
+  const [pushLoading, setPushLoading] = useState(false);
+  const [isWakeLockActive, setIsWakeLockActive] = useState(() => realtimeService.isWakeLockActive());
+  const [isTestingChime, setIsTestingChime] = useState(false);
+
+  // Load live settings & push status on mount
+  useEffect(() => {
+    realtimeService.getPushSubscriptionStatus().then((s) => {
+      setIsPushSubscribed(s.isSubscribed);
+    });
+
+    const handleWakeLock = (e: any) => {
+      setIsWakeLockActive(Boolean(e.detail?.active));
+    };
+    const handlePushStatus = (e: any) => {
+      setIsPushSubscribed(Boolean(e.detail?.isSubscribed));
+    };
+
+    window.addEventListener(WAKELOCK_STATUS_EVENT, handleWakeLock);
+    window.addEventListener(PUSH_SUBSCRIPTION_EVENT, handlePushStatus);
+    return () => {
+      window.removeEventListener(WAKELOCK_STATUS_EVENT, handleWakeLock);
+      window.removeEventListener(PUSH_SUBSCRIPTION_EVENT, handlePushStatus);
+    };
+  }, []);
 
   // Load live settings from backend on mount
   useEffect(() => {
@@ -166,6 +198,56 @@ export function MerchantSettingsDashboard({
     setNotifications(updated);
     await updateMerchantSettings({ notifications: updated });
     showStatus(`Notification for ${key} ${updated[key] ? 'enabled' : 'disabled'}.`);
+  };
+
+  // Lock-Screen Web Push Toggle
+  const handleTogglePush = async () => {
+    setPushLoading(true);
+    try {
+      if (isPushSubscribed) {
+        await realtimeService.unsubscribeMerchantFromPush(business.id);
+        setIsPushSubscribed(false);
+        showStatus('Lock-screen Web Push notifications disabled.');
+      } else {
+        const res = await realtimeService.subscribeMerchantToPush(business.id);
+        if (res.success) {
+          setIsPushSubscribed(true);
+          showStatus('Device armed! Lock-screen chime & push notifications enabled.');
+        } else {
+          showStatus(res.error || 'Could not enable push notifications.', 'error');
+        }
+      }
+    } finally {
+      setPushLoading(false);
+    }
+  };
+
+  // Screen Wake Lock Toggle (Counter Duty)
+  const handleToggleWakeLock = async () => {
+    if (isWakeLockActive) {
+      await realtimeService.releaseWakeLock();
+      setIsWakeLockActive(false);
+      showStatus('Screen wake lock released.');
+    } else {
+      const ok = await realtimeService.requestWakeLock();
+      if (ok) {
+        setIsWakeLockActive(true);
+        showStatus('Keep Screen Awake activated for checkout counter duty.');
+      } else {
+        showStatus('Screen Wake Lock is not supported or was blocked by device.', 'error');
+      }
+    }
+  };
+
+  // Test Order Audio Chime & Lock Screen Alert
+  const handleTestChimeAndRing = async () => {
+    setIsTestingChime(true);
+    try {
+      await realtimeService.triggerTestPush(business.id);
+      showStatus('Ring test triggered: audio chime and lock-screen alert fired!');
+    } finally {
+      setTimeout(() => setIsTestingChime(false), 800);
+    }
   };
 
   // Password / PIN Submit
@@ -445,7 +527,6 @@ export function MerchantSettingsDashboard({
                   className="w-full px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 font-bold text-slate-800 focus:outline-none"
                 >
                   <option>English</option>
-                  <option>हिन्दी (Hindi)</option>
                 </select>
               </div>
               <div>
@@ -488,7 +569,62 @@ export function MerchantSettingsDashboard({
         <div className="lg:col-span-6 bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs space-y-3 text-xs">
           <div className="flex items-center gap-2 pb-3 border-b border-slate-100 mb-2">
             <Bell className="w-4 h-4 text-purple-600" />
-            <h4 className="font-extrabold text-slate-900">Notifications</h4>
+            <h4 className="font-extrabold text-slate-900">Notifications & Lock-Screen Audio</h4>
+          </div>
+
+          {/* Background Audio Chime & Lock Screen Alerts Banner */}
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-100/80 mb-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`w-2.5 h-2.5 rounded-full ${isPushSubscribed ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+                <span className="font-extrabold text-slate-900 text-xs">
+                  {isPushSubscribed ? '🔔 Lock-Screen Ring Armed' : '🔕 Sleep / Background Chime'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleTogglePush}
+                disabled={pushLoading}
+                className={`px-3 py-1.5 rounded-xl font-bold transition text-[11px] cursor-pointer ${
+                  isPushSubscribed
+                    ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800'
+                    : 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
+                }`}
+              >
+                {pushLoading ? 'Arming...' : isPushSubscribed ? 'Active (Subscribed)' : 'Enable Ring on Sleep'}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              If your mobile screen turns off or sleeps, standard WebSockets can throttle. Web Push ensures your phone sounds the cash register chime &amp; vibrates on new incoming customer orders.
+            </p>
+
+            <div className="flex items-center justify-between pt-1 border-t border-purple-100/60">
+              {/* Screen Wake Lock */}
+              <button
+                type="button"
+                onClick={handleToggleWakeLock}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                  isWakeLockActive
+                    ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                    : 'bg-white/80 hover:bg-white text-slate-700 border border-slate-200/80'
+                }`}
+              >
+                <Sun className={`w-3.5 h-3.5 ${isWakeLockActive ? 'text-amber-600' : 'text-slate-400'}`} />
+                <span>{isWakeLockActive ? 'Keep Screen Awake: ON' : 'Keep Screen Awake'}</span>
+              </button>
+
+              {/* Test Audio Chime & Push */}
+              <button
+                type="button"
+                onClick={handleTestChimeAndRing}
+                disabled={isTestingChime}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/90 hover:bg-white text-purple-700 border border-purple-200 font-bold text-[11px] shadow-2xs transition cursor-pointer"
+              >
+                <Volume2 className={`w-3.5 h-3.5 ${isTestingChime ? 'animate-bounce text-purple-600' : 'text-purple-500'}`} />
+                <span>{isTestingChime ? 'Ringing...' : 'Test Audio Chime'}</span>
+              </button>
+            </div>
           </div>
 
           {[

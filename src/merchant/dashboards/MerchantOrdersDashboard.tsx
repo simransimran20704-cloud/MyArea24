@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { MerchantOrderItem, MerchantBusinessInfo } from '../types';
 import { realtimeService } from '../../services/realtimeService';
+import { advanceOrderStatus } from '../../services/orderCommerceService';
 
 interface MerchantOrdersDashboardProps {
   business: MerchantBusinessInfo;
@@ -73,10 +74,13 @@ export function MerchantOrdersDashboard({
 
     setProcessingOrderNum(order.orderNumber);
     try {
-      // 1. Update in parent merchant state & local cache
+      // 1. Persist status advancement to backend database and commerce store
+      await advanceOrderStatus(order.orderNumber, nextStatus);
+
+      // 2. Update in parent merchant state & local cache
       onUpdateOrderStatus(order.orderNumber, nextStatus);
 
-      // 2. Broadcast via WebSockets & update backend
+      // 3. Broadcast via WebSockets & update backend
       await realtimeService.triggerOrderStatusUpdate(order.orderNumber, nextStatus);
     } finally {
       setProcessingOrderNum(null);

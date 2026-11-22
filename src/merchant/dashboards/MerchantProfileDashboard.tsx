@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { MerchantBusinessInfo, MerchantDashboardId } from '../types';
+import { uploadMerchantMedia, updateStorefrontProfile } from '../services/merchantApiService';
+import { MediaUploadWidget } from '../components/MediaUploadWidget';
 import {
   Store,
   MapPin,
@@ -17,6 +19,7 @@ import {
   Share2,
   Save,
   Check,
+  Loader2,
 } from 'lucide-react';
 
 interface MerchantProfileDashboardProps {
@@ -54,11 +57,54 @@ export function MerchantProfileDashboard({
     address: business.fullAddress,
     landmark: business.landmark,
     serviceArea: business.serviceArea,
+    gstin: business.gstin || '',
+    fssaiLicenseNumber: business.fssaiLicenseNumber || business.fssai_license_number || '',
+    settlementUpiId: business.settlementUpiId || business.settlement_upi_id || '',
+    settlementBankAccount: business.settlementBankAccount || business.settlement_bank_account || '',
+    settlementBankIfsc: business.settlementBankIfsc || business.settlement_bank_ifsc || '',
   });
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement>(null);
+  const logoInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const localUrl = URL.createObjectURL(file);
+    onUpdateBusiness({ coverImage: localUrl });
+    setIsUploadingCover(true);
+    try {
+      const res = await uploadMerchantMedia(file);
+      if (res.success && res.url) {
+        onUpdateBusiness({ coverImage: res.url });
+        await updateStorefrontProfile({ coverImage: res.url });
+      }
+    } finally {
+      setIsUploadingCover(false);
+    }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const localUrl = URL.createObjectURL(file);
+    onUpdateBusiness({ logo: localUrl });
+    setIsUploadingLogo(true);
+    try {
+      const res = await uploadMerchantMedia(file);
+      if (res.success && res.url) {
+        onUpdateBusiness({ logo: res.url });
+        await updateStorefrontProfile({ logo: res.url });
+      }
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
 
   const handleSaveBasic = () => {
-    onUpdateBusiness({
+    const updated: Partial<MerchantBusinessInfo> = {
       name: formData.name,
       category: formData.category,
       tagline: formData.tagline,
@@ -68,7 +114,18 @@ export function MerchantProfileDashboard({
       fullAddress: formData.address,
       landmark: formData.landmark,
       serviceArea: formData.serviceArea,
-    });
+      gstin: formData.gstin,
+      fssaiLicenseNumber: formData.fssaiLicenseNumber,
+      fssai_license_number: formData.fssaiLicenseNumber,
+      settlementUpiId: formData.settlementUpiId,
+      settlement_upi_id: formData.settlementUpiId,
+      settlementBankAccount: formData.settlementBankAccount,
+      settlement_bank_account: formData.settlementBankAccount,
+      settlementBankIfsc: formData.settlementBankIfsc,
+      settlement_bank_ifsc: formData.settlementBankIfsc,
+    };
+    onUpdateBusiness(updated);
+    updateStorefrontProfile(updated);
     setIsEditingBasic(false);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2500);
@@ -89,14 +146,35 @@ export function MerchantProfileDashboard({
           />
           <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/20 to-transparent" />
 
+          {/* Hidden File Inputs for Cover and Logo */}
+          <input
+            ref={coverInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleCoverUpload}
+          />
+          <input
+            ref={logoInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleLogoUpload}
+          />
+
           {/* Change Cover Button */}
           <button
             type="button"
-            onClick={() => alert('Photo upload dialog: Select a new high-res cover banner for your storefront.')}
-            className="absolute top-4 right-4 px-3 py-1.5 rounded-xl bg-black/60 hover:bg-black/80 text-white text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1.5 transition cursor-pointer"
+            disabled={isUploadingCover}
+            onClick={() => coverInputRef.current?.click()}
+            className="absolute top-4 right-4 px-3 py-1.5 rounded-xl bg-black/60 hover:bg-black/80 text-white text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
           >
-            <Camera className="w-3.5 h-3.5" />
-            <span>Change Cover</span>
+            {isUploadingCover ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Camera className="w-3.5 h-3.5" />
+            )}
+            <span>{isUploadingCover ? 'Uploading...' : 'Change Cover'}</span>
           </button>
 
           {/* Public Listing Link */}
@@ -122,10 +200,15 @@ export function MerchantProfileDashboard({
               />
               <button
                 type="button"
-                onClick={() => alert('Logo upload dialog: Select a new square avatar logo.')}
-                className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-lg bg-indigo-600 text-white flex items-center justify-center hover:bg-indigo-700 transition shadow-xs"
+                disabled={isUploadingLogo}
+                onClick={() => logoInputRef.current?.click()}
+                className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-lg bg-indigo-600 text-white flex items-center justify-center hover:bg-indigo-700 transition shadow-xs disabled:opacity-50 cursor-pointer"
               >
-                <Camera className="w-3.5 h-3.5" />
+                {isUploadingLogo ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Camera className="w-3.5 h-3.5" />
+                )}
               </button>
             </div>
 
@@ -210,6 +293,46 @@ export function MerchantProfileDashboard({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* LEFT COLUMN: Basic Info + Location + Operating Hours (8 cols) */}
         <div className="lg:col-span-8 space-y-6">
+          {/* Card: Photos & Media Sub-tab */}
+          {activeSubTab === 'photos' && (
+            <div className="bg-white p-5 sm:p-6 rounded-3xl border border-purple-200/80 shadow-xs space-y-4 animate-in fade-in">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <Camera className="w-4 h-4 text-purple-600" />
+                  <h3 className="text-sm font-extrabold text-slate-900">Storefront Photos & Visual Branding</h3>
+                </div>
+                <span className="text-[10px] text-purple-700 bg-purple-50 px-2.5 py-0.5 rounded-full font-bold">
+                  Camera & Cloud Storage Active
+                </span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Take live photos of your shop front, entrance, counter, or service area. High-quality photos increase customer inquiries and local discovery on MyArea24 maps by up to 40%.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <MediaUploadWidget
+                  label="Cover Banner Photo"
+                  sublabel="Panoramic photo displayed at the top of your public store listing."
+                  value={business.coverImage}
+                  onChange={(url) => {
+                    onUpdateBusiness({ coverImage: url });
+                    updateStorefrontProfile({ coverImage: url });
+                  }}
+                  fallbackImage="./assets/crops/biz-ai-cafe.webp"
+                />
+                <MediaUploadWidget
+                  label="Store Logo / Profile Icon"
+                  sublabel="Square photo or shop icon shown in neighborhood directory and chat."
+                  value={business.logo}
+                  onChange={(url) => {
+                    onUpdateBusiness({ logo: url });
+                    updateStorefrontProfile({ logo: url });
+                  }}
+                  fallbackImage="./assets/crops/biz-card-chai.webp"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Card 1: Basic Information */}
           <div className="bg-white p-5 sm:p-6 rounded-3xl border border-slate-200/80 shadow-xs">
             <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
@@ -285,6 +408,79 @@ export function MerchantProfileDashboard({
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-semibold"
                   />
                 </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      GSTIN (Optional, 15-character)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 07AAAAA0000A1Z5"
+                      value={formData.gstin}
+                      onChange={(e) => setFormData({ ...formData, gstin: e.target.value.toUpperCase() })}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-semibold uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      FSSAI License No. (Food & Grocery)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 10019011000123 (14-digit)"
+                      value={formData.fssaiLicenseNumber}
+                      onChange={(e) => setFormData({ ...formData, fssaiLicenseNumber: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-semibold font-mono"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 pt-2 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                        <span>🏦 Merchant Daily Settlement Details</span>
+                      </span>
+                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        0% Commission Direct Payout
+                      </span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Settlement UPI ID (VPA)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. storename@okicici"
+                      value={formData.settlementUpiId}
+                      onChange={(e) => setFormData({ ...formData, settlementUpiId: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Bank Account Number
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 50100234567890"
+                      value={formData.settlementBankAccount}
+                      onChange={(e) => setFormData({ ...formData, settlementBankAccount: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-mono font-semibold"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Bank IFSC Code
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. HDFC0001234"
+                      value={formData.settlementBankIfsc}
+                      onChange={(e) => setFormData({ ...formData, settlementBankIfsc: e.target.value.toUpperCase() })}
+                      className="w-full sm:w-1/2 px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:border-purple-600 font-mono font-semibold uppercase"
+                    />
+                  </div>
+                </div>
                 <div className="pt-2 flex justify-end">
                   <button
                     type="button"
@@ -330,6 +526,51 @@ export function MerchantProfileDashboard({
                     🌐 {business.website}
                   </p>
                 </div>
+                {(business.gstin || business.fssaiLicenseNumber || business.fssai_license_number) && (
+                  <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-slate-100">
+                    {business.gstin && (
+                      <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                        <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">GSTIN</span>
+                        <span className="font-mono text-xs font-bold text-slate-800">{business.gstin}</span>
+                      </div>
+                    )}
+                    {(business.fssaiLicenseNumber || business.fssai_license_number) && (
+                      <div className="p-2.5 rounded-xl bg-emerald-50/60 border border-emerald-200/80">
+                        <span className="text-[10px] text-emerald-700 block font-bold uppercase tracking-wider">FSSAI Food License</span>
+                        <span className="font-mono text-xs font-bold text-emerald-900">
+                          {business.fssaiLicenseNumber || business.fssai_license_number}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {(business.settlementUpiId || business.settlement_upi_id || business.settlementBankAccount || business.settlement_bank_account) && (
+                  <div className="sm:col-span-2 p-3 rounded-2xl bg-indigo-50/60 border border-indigo-100 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700">Daily Payout & Settlement</span>
+                      <span className="text-[10px] font-semibold text-emerald-700">✓ Active</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                      {(business.settlementUpiId || business.settlement_upi_id) && (
+                        <div>
+                          <span className="text-slate-500">UPI ID: </span>
+                          <span className="font-mono font-bold text-slate-800">{business.settlementUpiId || business.settlement_upi_id}</span>
+                        </div>
+                      )}
+                      {(business.settlementBankAccount || business.settlement_bank_account) && (
+                        <div>
+                          <span className="text-slate-500">Bank Account: </span>
+                          <span className="font-mono font-bold text-slate-800">
+                            •••• {(business.settlementBankAccount || business.settlement_bank_account)?.slice(-4)}
+                          </span>
+                          {(business.settlementBankIfsc || business.settlement_bank_ifsc) && (
+                            <span className="text-slate-400 ml-1">({business.settlementBankIfsc || business.settlement_bank_ifsc})</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

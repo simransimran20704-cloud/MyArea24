@@ -576,3 +576,265 @@ def test_admin_can_access_and_manage_any_business(client, db_session, merchant_a
     res = client.get(f"/api/v1/merchant/overview?business_id={merchant_a['business'].id}", headers=headers)
     assert res.status_code == 200
     assert res.json()["business"]["id"] == merchant_a["business"].id
+
+
+def test_merchant_registration_and_cross_device_login(client, db_session):
+    """
+    Verify Bug 5 fix:
+    1. Merchant registers with store PIN -> credentials hashed with PBKDF2 in database, store persisted.
+    2. Merchant can log in from any other computer/browser with phone/email and PIN.
+    3. Wrong PIN is rejected with 401.
+    4. Password change hashes new PIN in database and invalidates old PIN.
+    """
+    reg_payload = {
+        "business_name": "Sharma Sweets & Bakers",
+        "category": "Retail & Grocery",
+        "owner_name": "Ramesh Sharma",
+        "phone": "+91 98119 88776",
+        "whatsapp": "+91 98119 88776",
+        "email": "ramesh.sharma@sharmasweets.in",
+        "full_address": "Shop 14, Main Market, Sector 15",
+        "locality": "Rohini Sector 15",
+        "city": "Delhi",
+        "pincode": "110089",
+        "doc_type": "GSTIN",
+        "doc_number": "07AAAAA1234A1Z5",
+        "opening_time": "08:00",
+        "closing_time": "22:00",
+        "store_pin": "5432",
+    }
+
+    # 1. Register on server
+    reg_res = client.post("/api/v1/merchant/register", json=reg_payload)
+    assert reg_res.status_code == 200, reg_res.text
+    reg_data = reg_res.json()
+    assert reg_data["status"] == "success"
+    assert "token" in reg_data
+    assert reg_data["business"]["name"] == "Sharma Sweets & Bakers"
+    # Ensure plain-text PIN is NOT in response profile
+    assert "storePin" not in reg_data["profile"]
+
+    # Verify user in database has password_hash and not plain-text PIN
+    user = db_session.query(User).filter(User.email == "ramesh.sharma@sharmasweets.in").first()
+    assert user is not None
+    assert user.password_hash is not None
+    assert user.password_hash.startswith("pbkdf2_sha256$")
+    assert "5432" not in user.password_hash
+
+    # Verify business in database
+    biz = db_session.query(Business).filter(Business.owner_id == user.id).first()
+    assert biz is not None
+    assert biz.name == "Sharma Sweets & Bakers"
+
+    # 2. Login simulation from a new browser with phone and correct PIN
+    login_res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "+91 98119 88776", "store_pin": "5432"},
+    )
+    assert login_res.status_code == 200
+    login_data = login_res.json()
+    assert login_data["status"] == "success"
+    assert login_data["business"]["name"] == "Sharma Sweets & Bakers"
+    assert "token" in login_data
+
+    # 3. Login simulation with wrong PIN
+    bad_login = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "+91 98119 88776", "store_pin": "9999"},
+    )
+    assert bad_login.status_code == 401
+    assert "incorrect store access pin" in bad_login.json()["detail"].lower()
+
+    # 4. Change password/PIN via authenticated endpoint
+    headers = {"Authorization": f"Bearer {login_data['token']}"}
+    change_res = client.post(
+        "/api/v1/merchant/security/password",
+        json={"old_pin": "5432", "new_pin": "8877"},
+        headers=headers,
+    )
+    assert change_res.status_code == 200
+
+    # Old PIN rejected
+    old_pin_login = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "ramesh.sharma@sharmasweets.in", "store_pin": "5432"},
+    )
+    assert old_pin_login.status_code == 401
+
+    # New PIN succeeds
+    new_pin_login = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "ramesh.sharma@sharmasweets.in", "store_pin": "8877"},
+    )
+    assert new_pin_login.status_code == 200
+    assert new_pin_login.json()["business"]["name"] == "Sharma Sweets & Bakers"
+
+
+# ==============================================================================
+# 11. Comprehensive Merchant Login & RBAC Verification Tests
+# ==============================================================================
+def test_login_invalid_phone_or_email_rejected(client):
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "nonexistent@merchant.com", "store_pin": "1234"},
+    )
+    assert res.status_code == 401
+    assert "no merchant storefront found" in res.json()["detail"].lower()
+
+    res2 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "9999999999", "store_pin": "1234"},
+    )
+    assert res2.status_code == 401
+    assert "no merchant storefront found" in res2.json()["detail"].lower()
+
+
+def test_login_empty_inputs_rejected(client):
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "", "store_pin": "1234"},
+    )
+    assert res.status_code == 400
+
+    res2 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "9811000001", "store_pin": ""},
+    )
+    assert res2.status_code == 400
+
+
+def test_login_deactivated_merchant_rejected(client, db_session, merchant_a):
+    from backend.app.core.security import hash_password
+    merchant_a["user"].password_hash = hash_password("1234")
+    merchant_a["user"].is_active = False
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": merchant_a["user"].phone, "store_pin": "1234"},
+    )
+    assert res.status_code == 403
+    assert "deactivated" in res.json()["detail"].lower()
+
+
+def test_login_unverified_merchant_rejected(client, db_session, merchant_a):
+    from backend.app.core.security import hash_password
+    merchant_a["user"].password_hash = hash_password("1234")
+    merchant_a["user"].is_verified = False
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": merchant_a["user"].phone, "store_pin": "1234"},
+    )
+    assert res.status_code == 403
+    assert "pending verification" in res.json()["detail"].lower()
+
+
+def test_login_resident_role_rejected_rbac(client, db_session):
+    from backend.app.core.security import hash_password
+    resident = User(
+        email="resident_trying_merchant@myarea24.in",
+        phone="+919876543219",
+        full_name="Resident User",
+        role="resident",
+        is_active=True,
+        is_verified=True,
+        password_hash=hash_password("1234"),
+    )
+    db_session.add(resident)
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": resident.phone, "store_pin": "1234"},
+    )
+    assert res.status_code == 403
+    assert "merchant storefront privileges" in res.json()["detail"].lower()
+
+
+def test_login_phone_format_flexibility(client, db_session):
+    from backend.app.core.security import hash_password
+    user = User(
+        email="phone_flex@merchant.in",
+        phone="+91-98110-55443",
+        full_name="Flexible Merchant",
+        role="merchant",
+        is_active=True,
+        is_verified=True,
+        password_hash=hash_password("5544"),
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    biz = Business(
+        name="Flex Merchant Store",
+        slug="flex-merchant-store",
+        owner_id=user.id,
+        category="Retail",
+        address="Sector 10",
+        locality="Sector 10",
+        city="Delhi",
+        latitude=28.7041,
+        longitude=77.1025,
+        phone="+91-98110-55443",
+        status="active",
+        is_verified=True,
+    )
+    db_session.add(biz)
+    db_session.commit()
+
+    # Log in with 10 digits without +91 or hyphens
+    res1 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "9811055443", "store_pin": "5544"},
+    )
+    assert res1.status_code == 200
+    assert res1.json()["business"]["name"] == "Flex Merchant Store"
+
+    # Log in with +91 and spaces
+    res2 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "+91 98110 55443", "store_pin": "5544"},
+    )
+    assert res2.status_code == 200
+
+    # Log in with exact string
+    res3 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "+91-98110-55443", "store_pin": "5544"},
+    )
+    assert res3.status_code == 200
+
+    # Log in with email
+    res4 = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "phone_flex@merchant.in", "store_pin": "5544"},
+    )
+    assert res4.status_code == 200
+
+
+def test_account_without_password_hash_cannot_bypass_auth(client, db_session):
+    # A user without a password hash cannot log in with any random PIN
+    user = User(
+        email="nopassword@merchant.in",
+        phone="+919811099887",
+        full_name="No Pass Merchant",
+        role="merchant",
+        is_active=True,
+        is_verified=True,
+        password_hash=None,
+    )
+    db_session.add(user)
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/merchant/login",
+        json={"identifier": "+919811099887", "store_pin": "9999"},
+    )
+    assert res.status_code == 401
+    assert "incorrect store access pin" in res.json()["detail"].lower()
+    # Confirm password hash was NOT backdoor-assigned
+    db_session.refresh(user)
+    assert user.password_hash is None

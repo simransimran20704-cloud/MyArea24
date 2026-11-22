@@ -1,6 +1,8 @@
 from typing import Any, Dict, List, Optional
 import math
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
+from sqlalchemy.orm import Session
+from backend.app.database.session import get_db
 from pydantic import BaseModel
 from backend.app.services.indian_spatial_service import (
     INDIAN_ADMINISTRATIVE_DISTRICTS,
@@ -123,6 +125,30 @@ async def search_localities_and_districts(
     """
     query = q.strip().lower()
     matches: List[Dict[str, Any]] = []
+
+    # 0. Instant PIN code resolver for Indian PIN codes
+    pin_digits = "".join([c for c in query if c.isdigit()])
+    if len(pin_digits) >= 4:
+        from backend.app.api.maps import VERIFIED_PINCODES
+        for v_pin, v_info in VERIFIED_PINCODES.items():
+            if pin_digits in v_pin:
+                matches.append({
+                    "id": f"pin-{v_pin}",
+                    "name": f"{v_info['name']} (PIN {v_pin})",
+                    "district": v_info.get("district", "Delhi"),
+                    "city": v_info.get("city", "Delhi"),
+                    "village": "",
+                    "tehsil": v_info.get("name", ""),
+                    "state": v_info.get("state", "Delhi"),
+                    "pincode": v_pin,
+                    "latitude": v_info["lat"],
+                    "longitude": v_info["lng"],
+                    "display_label": f"{v_info['name']} (PIN {v_pin}), {v_info.get('district', 'Delhi')}",
+                    "formatted_address": f"{v_info['name']}, Delhi - {v_pin}, India",
+                    "coverage_status": "Active Coverage",
+                    "accuracy": "pincode",
+                    "is_live_supported": True,
+                })
 
     # 1. Search in all 780+ district centroids across India
     for st_name, loc_list in INDIAN_DISTRICTS_DATA.items():
@@ -312,16 +338,17 @@ async def get_places_and_roads_nearby(
     lng: Optional[float] = Query(None, ge=-180.0, le=180.0, description="Longitude alias"),
     radius: int = Query(4000, ge=500, le=25000, description="Radius in meters"),
     category: Optional[str] = Query(None, description="Optional category filter"),
+    db: Session = Depends(get_db),
 ):
     """
     Unified nearby POI, business storefront, and road corridor resolver.
-    Proxies and caches spatial queries on the backend with application User-Agent
-    and strict rate-limiting, preventing browser HTTP 429 errors and Nominatim TOS violations.
+    Integrates Tier-1 In-memory Spatial Proximity caching, Tier-2 Redis Spatial cache,
+    and indexed database spatial bounding queries for sub-millisecond instant map panning.
     """
     lon_val = lon if lon is not None else lng
     if lon_val is None:
         raise HTTPException(status_code=400, detail="Missing lon or lng parameter")
-    return await fetch_places_nearby(lat, lon_val, radius_meters=radius, category=category)
+    return await fetch_places_nearby(lat, lon_val, radius_meters=radius, category=category, db=db)
 
 
 locations_plural_router = APIRouter(prefix="/api/v1/locations", tags=["Pan-India Locations (Plural Alias)"])

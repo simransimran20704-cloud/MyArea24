@@ -6,20 +6,27 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pages:build": "vite build",
+    "pages:deploy": "wrangler pages deploy dist --project-name=myarea24"
   },
   "dependencies": {
     "@neon/config": "^1.9.4",
     "@neon/env": "^1.6.5",
     "@types/leaflet": "^1.9.22",
+    "i18next": "^26.5.11",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-i18next": "^17.1.9",
     "react-leaflet": "^4.2.1",
-    "react-router-dom": "^7.18.4"
+    "react-leaflet-cluster": "^2.1.0",
+    "react-router-dom": "^7.18.4",
+    "zustand": "^5.0.16"
   },
   "devDependencies": {
+    "@types/leaflet.markercluster": "^1.5.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
@@ -28,6 +35,7 @@
     "puppeteer-core": "^25.14.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.6.3",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "wrangler": "^4.163.0"
   }
 }

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { MediaUploadWidget } from './MediaUploadWidget';
 import {
   MerchantProductItem,
   MerchantServiceItem,
@@ -92,6 +93,12 @@ export function MerchantActionModals({
 
   const [copiedReviewLink, setCopiedReviewLink] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Uploaded media states
+  const [prodImage, setProdImage] = useState<string>('');
+  const [srvImage, setSrvImage] = useState<string>('');
+  const [offerImage, setOfferImage] = useState<string>('');
+  const [postImage, setPostImage] = useState<string>('');
 
   const getProductImage = (cat: string) => {
     switch (cat) {
@@ -222,6 +229,15 @@ export function MerchantActionModals({
                 />
               </div>
 
+              {/* Media Upload & Camera Capture */}
+              <MediaUploadWidget
+                label="Product Photo (Camera Capture or Upload)"
+                sublabel="Take a photo with your mobile camera or upload from your device gallery."
+                value={prodImage}
+                onChange={(url) => setProdImage(url)}
+                fallbackImage={getProductImage(prodForm.category)}
+              />
+
               <button
                 type="button"
                 onClick={() => {
@@ -242,7 +258,7 @@ export function MerchantActionModals({
                     status: 'Active',
                     views: 1,
                     enquiries: 0,
-                    image: getProductImage(prodForm.category),
+                    image: prodImage || getProductImage(prodForm.category),
                     description: prodForm.description.trim() || 'Fresh store stock ready for pickup',
                   });
                   onClose();
@@ -299,6 +315,15 @@ export function MerchantActionModals({
                 />
               </div>
 
+              {/* Service Media Upload & Camera Capture */}
+              <MediaUploadWidget
+                label="Service Photo / Equipment (Camera Capture or Upload)"
+                sublabel="Take a photo with your mobile camera or upload from your device gallery."
+                value={srvImage}
+                onChange={(url) => setSrvImage(url)}
+                fallbackImage="./assets/crops/event-comedy.webp"
+              />
+
               <button
                 type="button"
                 onClick={() => {
@@ -312,7 +337,7 @@ export function MerchantActionModals({
                     status: 'Active',
                     views: 0,
                     enquiries: 0,
-                    image: './assets/crops/event-comedy.webp',
+                    image: srvImage || './assets/crops/event-comedy.webp',
                     description: srvForm.description,
                   });
                   onClose();
@@ -372,6 +397,15 @@ export function MerchantActionModals({
                 />
               </div>
 
+              {/* Offer Banner Upload & Camera Capture */}
+              <MediaUploadWidget
+                label="Offer Banner / Photo"
+                sublabel="Take a photo or upload a promotional banner for this discount."
+                value={offerImage}
+                onChange={(url) => setOfferImage(url)}
+                fallbackImage="./assets/crops/biz-urban-chai.webp"
+              />
+
               <button
                 type="button"
                 onClick={() => {
@@ -387,7 +421,7 @@ export function MerchantActionModals({
                     status: 'Active',
                     views: 0,
                     redemptions: 0,
-                    image: './assets/crops/biz-urban-chai.webp',
+                    image: offerImage || './assets/crops/biz-urban-chai.webp',
                     code: offerForm.code,
                   });
                   onClose();
@@ -437,6 +471,15 @@ export function MerchantActionModals({
                 />
               </div>
 
+              {/* Post Photo Upload & Camera Capture */}
+              <MediaUploadWidget
+                label="Post Photo / Snapshot"
+                sublabel="Take a store photo or upload a graphic for this neighborhood update."
+                value={postImage}
+                onChange={(url) => setPostImage(url)}
+                fallbackImage="./assets/crops/biz-urban-chai.webp"
+              />
+
               <button
                 type="button"
                 onClick={() => {
@@ -451,7 +494,7 @@ export function MerchantActionModals({
                     views: 0,
                     likes: 0,
                     shares: 0,
-                    image: './assets/crops/biz-urban-chai.webp',
+                    image: postImage || './assets/crops/biz-urban-chai.webp',
                   });
                   onClose();
                 }}

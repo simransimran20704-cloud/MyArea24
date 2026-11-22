@@ -1,0 +1,48 @@
+# MyArea24 — Everything Around You, in One Place.
+
+> MyArea24 is India's hyper-local neighbourhood discovery and civic intelligence platform. It connects citizens with verified local merchants, neighbourhood services, real-time civic telemetry, and community events across 780+ districts.
+
+## Core Mission & Purpose
+MyArea24 empowers Indian citizens to discover everything happening within their immediate 15 km radius, while enabling independent local shopkeepers, merchants, and service professionals to build digital visibility and engage their community without commission lock-ins.
+
+## Primary Capabilities & Features
+
+### 1. Neighbourhood Commerce & Local Shopping
+- **Local Businesses & Stores:** Discover verified kirana stores, pharmacies, restaurants, clinics, and service centers ranked by distance, verification, and live opening status.
+- **Product Price Comparison:** Compare retail prices between local neighbourhood counters and e-commerce platforms.
+- **Service Listings:** Book local verified professionals (electricians, plumbers, repair technicians) with transparent pricing and direct contact.
+- **Store Offers & Deals:** Access verified in-store discounts, festive coupons, and merchant promotions.
+
+### 2. Live Civic & Ambient Telemetry
+- **Weather & Dispersal Advisories:** High-resolution local temperature, humidity, rainfall, and commute weather advisories.
+- **Arterial Traffic & Commute Corridors:** Real-time road bottleneck alerts, jam delays, and alternate corridor suggestions.
+- **Air Quality Index (NAQI):** Continuous ambient air quality metrics (PM2.5, PM10) from central and state monitoring stations.
+- **Daily Fuel & CNG Rates:** Verified daily 6:00 AM retail petrol, diesel, and CNG rates across Indian districts.
+- **Sabzi Mandi Wholesale Rates:** APMC / Agmarknet modal commodity rates with trend indicators.
+- **NDMA SACHET Disaster Bulletins:** Official Common Alerting Protocol (CAP) civil protection notices.
+
+### 3. Real-Time Community Events & Activities
+- Discover upcoming college fests, hackathons, coding contests, family carnivals, music concerts, and traditional festivals.
+- Sourced from verified discovery networks: Eventbrite, AllEvents.in, Brabble.ai, TathaAstu Panchang, and municipal boards.
+
+### 4. Saathi AI (साथी) — The Neighbourhood Companion
+- An empathetic, localized AI assistant that speaks natural Hinglish, Hindi, and English.
+- Fully grounded in verified database observations with zero synthetic hallucinations.
+- Features enterprise AI guardrails, PII redaction, and strict DPDP Act 2023 compliance.
+
+## Official Data Provenance & Trust Framework
+- **Weather:** WeatherAPI / Open-Meteo
+- **Traffic:** TomTom Traffic Telemetry
+- **Disaster Alerts:** NDMA SACHET (Govt. of India)
+- **Air Quality:** CPCB / OpenAQ
+- **Fuel Rates:** IOCL, BPCL, HPCL via PPAC / Petroleum Feeds
+- **Mandi Rates:** Agmarknet / APMC Mandi Feeds
+- **Events:** Eventbrite, AllEvents.in, Brabble.ai, TathaAstu API
+- **Map Geometry:** OpenStreetMap Contributors & CARTO
+
+## Public API & Documentation
+- **Website:** https://aidivi265.github.io/myarea24-frontend/ (and https://myarea24.com)
+- **API Documentation:** `/docs` (when enabled in development)
+- **Robots Policy:** https://aidivi265.github.io/myarea24-frontend/robots.txt
+- **Sitemap:** https://aidivi265.github.io/myarea24-frontend/sitemap.xml
+- **Privacy & DPDP Policy:** `/compliance` (Digital Personal Data Protection Act 2023)

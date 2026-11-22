@@ -43,3 +43,24 @@ def test_system_mesh_status():
     assert data["status"] == "synchronized"
     assert data["mesh_network_state"] == "ACTIVE"
     assert "active_districts_indexed" in data
+
+
+def test_hyperlocal_discovery_pincode_and_search():
+    """Verify products, businesses, and services accept pincode and q filters without error."""
+    res = client.get("/api/v1/products?q=milk&pincode=110001&page_size=10")
+    assert res.status_code == 200
+    p_data = res.json()
+    assert "items" in p_data
+    assert "total" in p_data
+
+    res_b = client.get("/api/v1/businesses?q=pharmacy&pincode=110001&page_size=10")
+    assert res_b.status_code == 200
+    b_data = res_b.json()
+    assert "items" in b_data
+    assert "total" in b_data
+
+    res_s = client.get("/api/v1/services?q=electrician&pincode=110001&page_size=10")
+    assert res_s.status_code == 200
+    s_data = res_s.json()
+    assert "items" in s_data
+    assert "total" in s_data

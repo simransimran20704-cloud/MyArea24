@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { DashboardCommonProps } from './MainDashboards';
 import { HeroBanner } from '../components/HeroBanner';
 import { InteractiveMap } from '../components/InteractiveMap';
-import { askLiveAiAssistant } from '../services/liveIntelligence';
+import { GoogleMapsTrafficModule } from '../components/GoogleMapsTrafficModule';
+import { AlertBanner } from '../components/AlertBanner';
+import { askLiveAiAssistant, streamLiveAiAssistant } from '../services/liveIntelligence';
 import { realtimeService } from '../services/realtimeService';
+import { getStoredAuthUser } from '../services/authService';
 import {
   speakTextWithSarvamOrBrowser,
   startVoiceRecognition,
@@ -34,7 +38,24 @@ import {
   Clock,
   Layers,
   PhoneCall,
+  Edit2,
+  Trash2,
+  Navigation,
+  Search,
+  Plus,
+  X,
+  AlertCircle,
 } from 'lucide-react';
+import {
+  SavedCommuteRoute,
+  fetchSavedRoutes,
+  createSavedRoute,
+  updateSavedRoute,
+  deleteSavedRoute,
+  checkRouteTraffic,
+  getLocalCachedRoutes,
+} from '../services/routeService';
+import { searchLocationsLive } from '../services/liveIntelligence';
 
 /* ============================================================================
    7. AREA INTELLIGENCE DASHBOARD — CITIZEN DECISION & CROSS-SIGNAL ENGINE
@@ -46,6 +67,20 @@ import {
      4) Best Time Windows Today (Smart 12-Hour Citizen Planner)
      5) Hyperlocal Citizen Demand & Behavioral Pulse
    ============================================================================ */
+export function sanitizeAreaName(area: string): { shortArea: string; displayArea: string } {
+  const rawShort = (area || '').split(',')[0]?.trim() || '';
+  const isPlaceholder =
+    !rawShort ||
+    rawShort.toLowerCase().includes('select') ||
+    rawShort.toLowerCase().includes('choose') ||
+    rawShort.toLowerCase() === 'india' ||
+    rawShort.toLowerCase() === 'local area';
+  if (isPlaceholder) {
+    return { shortArea: 'New Delhi', displayArea: 'New Delhi, Delhi NCR' };
+  }
+  return { shortArea: rawShort, displayArea: area };
+}
+
 export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
   onNavigate,
   onAskAi,
@@ -55,7 +90,7 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
   const { weather, airQuality, traffic, alerts, demandTrends, location, safetyScore, safetyVerdict } =
     liveIntel;
 
-  const shortArea = selectedArea.split(',')[0]?.trim() || selectedArea;
+  const { shortArea, displayArea } = sanitizeAreaName(selectedArea);
   const pm25Obj = airQuality.pollutants.find((p) => p.name === 'PM2.5');
   const pm10Obj = airQuality.pollutants.find((p) => p.name === 'PM10');
   const pm25Val = pm25Obj?.value ?? 42;
@@ -114,7 +149,7 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
           : airQuality.aqiValue > 120 || weather.temperatureC >= 35
           ? 'bg-amber-100 text-amber-800 border-amber-200'
           : 'bg-emerald-100 text-emerald-800 border-emerald-200',
-      signalsUsed: `CPCB AQI ${airQuality.aqiValue} + Temp ${weather.temperatureC}°C`,
+      signalsUsed: `AQI ${airQuality.aqiValue} + Temp ${weather.temperatureC}°C`,
       reason:
         airQuality.aqiValue > 200
           ? `PM2.5 is ${pm25Val} µg/m³ (${airQuality.aqiCategory}). Switch to indoor gym/yoga today.`
@@ -315,19 +350,19 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
             <span className="px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-300/40 text-emerald-200 text-[10px] font-bold flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               {liveIntel.loading
-                ? 'Synthesizing Signals...'
-                : `Multi-Signal Engine • ${location.lat.toFixed(3)}°N, ${location.lng.toFixed(3)}°E`}
+                ? 'Updating...'
+                : `Live Overview • ${location.areaName}`}
             </span>
           </div>
         }
         title={
           <>
-            Area Decision Engine,
+            Area Overview,
             <br />
-            <span className="text-[#93C5FD]">Cross-Signal Intelligence</span>
+            <span className="text-[#93C5FD]">Local Conditions & Insights</span>
           </>
         }
-        description="Unlike raw weather or traffic pages, Area Intelligence correlates all live environmental, mobility, and civic signals to help you decide what to do and when to step out."
+        description="Combines current weather, air quality, traffic, and local notices to help you plan your day."
         askAiWidget={{
           placeholder: `Ask Saathi AI to plan your day in ${shortArea}...`,
           chips: [
@@ -344,13 +379,13 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
       <div className="flex items-center justify-between gap-2 flex-wrap bg-white rounded-2xl px-4 py-2.5 shadow-card border border-slate-200/70">
         <div className="flex items-center gap-2.5 flex-wrap">
           <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white text-xs font-extrabold flex items-center gap-1.5">
-            <Layers className="w-3.5 h-3.5" /> Cross-Signal Synthesis
+            <Layers className="w-3.5 h-3.5" /> Area Summary
           </span>
           <span className="text-xs text-slate-600 font-medium">
-            Correlating <strong className="text-slate-900">Meteorology</strong> +{' '}
-            <strong className="text-slate-900">CPCB Air Quality</strong> +{' '}
-            <strong className="text-slate-900">TomTom Corridors</strong> +{' '}
-            <strong className="text-slate-900">NDMA Alerts</strong> for {shortArea}
+            Overview of <strong className="text-slate-900">Weather</strong> +{' '}
+            <strong className="text-slate-900">Air Quality</strong> +{' '}
+            <strong className="text-slate-900">Live Traffic</strong> +{' '}
+            <strong className="text-slate-900">Local Notices</strong> for {shortArea}
           </span>
         </div>
 
@@ -363,6 +398,20 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
           <span>Synced {liveIntel.lastUpdated}</span>
         </button>
       </div>
+
+      {Boolean(liveIntel.isSimulated || weather.isSimulated || airQuality.isSimulated || traffic.isSimulated) && (
+        <div className="px-4 py-2.5 rounded-2xl bg-amber-50/90 border border-amber-200/80 flex items-center justify-between gap-3 text-xs text-amber-900 shadow-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-base">ℹ️</span>
+            <span>
+              <strong>Regional Estimates:</strong> Standard regional estimates are currently shown for environmental conditions in this area.
+            </span>
+          </div>
+          <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-amber-200/80 text-amber-900 border border-amber-300 shrink-0">
+            Estimated Mode
+          </span>
+        </div>
+      )}
 
       {/* SECTION 1: NEIGHBORHOOD LIVABILITY & READINESS SCORECARD (0-100) */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
@@ -497,14 +546,14 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
           <div>
             <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
               <Compass className="w-4 h-4 text-blue-600" />
-              <span>“Should I Step Out Right Now?” — Citizen Activity Verdicts</span>
+              <span>Outdoor Activity Recommendations</span>
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Automated Go / Caution / Avoid decisions for {shortArea} by combining Weather, CPCB AQI, Wind, and Traffic
+              Activity guidance for {shortArea} based on current weather, air quality, and traffic conditions
             </p>
           </div>
           <span className="px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold self-start sm:self-auto">
-            ● Live Decision Matrix
+            ● Live Guidance
           </span>
         </div>
 
@@ -552,14 +601,14 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
           <div className="flex items-center justify-between mb-3.5">
             <div>
               <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-indigo-600" /> Active Cross-Signal Correlations
+                <Sparkles className="w-4 h-4 text-indigo-600" /> Current Neighborhood Conditions
               </h3>
               <p className="text-[11px] text-slate-500">
-                How multiple environmental and road signals are interacting in {shortArea} right now
+                How current weather, air quality, and road conditions interact in {shortArea}
               </p>
             </div>
             <span className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-extrabold">
-              CAUSAL ENGINE
+              CURRENT INSIGHTS
             </span>
           </div>
 
@@ -605,7 +654,7 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
                   icon: '🪟',
                   label: 'Best Window to Ventilate Home',
                   time: lowestAqiHour.timeLabel,
-                  sub: `Lowest projected AQI (~${lowestAqiHour.aqi} CPCB)`,
+                  sub: `Lowest projected AQI (~${lowestAqiHour.aqi})`,
                   cls: 'bg-emerald-50 text-emerald-700',
                 },
                 {
@@ -695,10 +744,10 @@ export const IntelligenceDashboard: React.FC<DashboardCommonProps> = ({
 export const WeatherDashboard: React.FC<
   DashboardCommonProps & { initialMode?: 'all' | 'weather' | 'aqi' }
 > = ({ onAskAi, selectedArea, liveIntel, onOpenLocationPicker, initialMode = 'all' }) => {
-  const [viewMode, setViewMode] = useState<'all' | 'weather' | 'aqi'>(initialMode);
+  const [viewMode] = useState<'all'>('all');
   const [trendRange, setTrendRange] = useState<'24h' | '5d'>('24h');
   const { weather, airQuality, location } = liveIntel;
-  const shortArea = selectedArea.split(',')[0]?.trim() || selectedArea;
+  const { shortArea, displayArea } = sanitizeAreaName(selectedArea);
 
   // Build real SVG path from live 24h or 5-day AQI points
   const chartPoints =
@@ -738,32 +787,30 @@ export const WeatherDashboard: React.FC<
           </>
         }
         title="Weather & Air Quality"
-        subtitle="Unified Live Meteorology & Official CPCB 2014 NAQI"
-        description={`Real-time atmospheric telemetry (${weather.temperatureC}°C ${weather.conditionText} • AQI ${airQuality.aqiValue} ${airQuality.aqiCategory}) for ${shortArea} (${location.lat.toFixed(
-          3
-        )}°N, ${location.lng.toFixed(3)}°E).`}
+        subtitle="Live Weather & Air Quality Index"
+        description={`Current weather conditions (${weather.temperatureC}°C ${weather.conditionText} • AQI ${airQuality.aqiValue} ${airQuality.aqiCategory}) for ${shortArea}.`}
         bottomPills={[
           {
             icon: <span>🌤️</span>,
-            label: 'Complete Atmosphere (Weather + AQI)',
+            label: 'Overview (Weather & AQI)',
             active: viewMode === 'all',
             onClick: () => setViewMode('all'),
           },
           {
             icon: <span>☀️</span>,
-            label: 'Forecast & Meteorology',
+            label: 'Weather & Forecast',
             active: viewMode === 'weather',
             onClick: () => setViewMode('weather'),
           },
           {
             icon: <span>🍃</span>,
-            label: 'CPCB Air Quality & Health Lab',
+            label: 'Air Quality & Health Guide',
             active: viewMode === 'aqi',
             onClick: () => setViewMode('aqi'),
           },
         ]}
         askAiWidget={{
-          placeholder: `Ask about weather, rain or CPCB AQI in ${shortArea}...`,
+          placeholder: `Ask about weather, rain or air quality in ${shortArea}...`,
           chips: ['Will it rain today?', 'Is AQI safe for jogging?', '7-day weather & air outlook'],
           onAsk: onAskAi,
         }}
@@ -782,12 +829,19 @@ export const WeatherDashboard: React.FC<
               <div className="flex items-center gap-2">
                 <Sun className="w-4 h-4 text-amber-500" />
                 <h3 className="text-sm font-extrabold text-slate-900">
-                  Live Meteorological Telemetry ({shortArea})
+                  {weather.isSimulated ? 'Estimated Weather' : 'Current Weather'} ({shortArea})
                 </h3>
               </div>
-              <span className="text-[11px] text-emerald-600 font-semibold">
-                ● Live ({weather.observedAt})
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[11px] font-semibold ${weather.isSimulated ? 'text-amber-600' : 'text-emerald-600'}`}>
+                  ● {weather.isSimulated ? 'Estimated Model' : 'Live'} ({weather.observedAt})
+                </span>
+                {weather.isSimulated && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-100 text-amber-800 border border-amber-300">
+                    ESTIMATED
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 my-2">
@@ -858,11 +912,16 @@ export const WeatherDashboard: React.FC<
             } bg-white rounded-2xl p-5 shadow-card border border-slate-200/70 flex flex-col justify-between`}
           >
             <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span>🍃</span>
                 <h3 className="text-sm font-extrabold text-slate-900">
-                  Official CPCB 2014 Air Quality ({airQuality.stationName})
+                  {airQuality.isSimulated ? 'Estimated Air Quality' : 'Air Quality Index'} ({airQuality.stationName})
                 </h3>
+                {airQuality.isSimulated && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-100 text-amber-800 border border-amber-300">
+                    ESTIMATED BASELINE
+                  </span>
+                )}
               </div>
               <button
                 type="button"
@@ -933,7 +992,7 @@ export const WeatherDashboard: React.FC<
           <div className="xl:col-span-6 bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-extrabold text-slate-900">🕒 24-Hour Hourly Forecast</h3>
-              <span className="text-[11px] font-semibold text-slate-400">{weather.source}</span>
+              <span className="text-[11px] font-semibold text-slate-400">Live Forecast</span>
             </div>
             <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 text-center">
               {weather.hourly.slice(0, 8).map((h, i) => (
@@ -987,7 +1046,7 @@ export const WeatherDashboard: React.FC<
           <div className="xl:col-span-6 bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-extrabold text-slate-900">
-                📈 Live CPCB AQI Trajectory ({shortArea})
+                📈 24-Hour AQI Trend ({shortArea})
               </h3>
               <div className="flex gap-1">
                 {(['24h', '5d'] as const).map((r) => (
@@ -1038,9 +1097,9 @@ export const WeatherDashboard: React.FC<
           <div className="xl:col-span-6 bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-extrabold text-slate-900">
-                🫁 Respiratory & Protection Guide by Citizen Group
+                🫁 Health & Protection Recommendations
               </h3>
-              <span className="text-[10px] font-bold text-indigo-600">CPCB Health Protocol</span>
+              <span className="text-[10px] font-bold text-indigo-600">Health Guidelines</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
               {[
@@ -1099,6 +1158,7 @@ export const AirQualityDashboard: React.FC<DashboardCommonProps> = (props) => (
 /* ============================================================================
    10. TRAFFIC DASHBOARD (Page 20 Desktop) — 100% LIVE CORRIDOR & TOMTOM TELEMETRY
    ============================================================================ */
+
 export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
   onOpenModal,
   onAskAi,
@@ -1107,13 +1167,224 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
 }) => {
   const [forecastTab, setForecastTab] = useState('Next 1 Hour');
   const [trafficMapFilter, setTrafficMapFilter] = useState<'Live Traffic' | 'Incidents' | 'Corridors'>('Live Traffic');
+  
+  // Real user-saved daily commute routes (persistent via backend + localStorage)
+  const [savedRoutes, setSavedRoutes] = useState<SavedCommuteRoute[]>(() => getLocalCachedRoutes());
+  const [selectedRouteId, setSelectedRouteId] = useState<string | number | null>(() => {
+    const cached = getLocalCachedRoutes();
+    return cached.length > 0 ? cached[0].id : null;
+  });
+  const [isLoadingRoutes, setIsLoadingRoutes] = useState<boolean>(false);
+  const [isAddingRoute, setIsAddingRoute] = useState(false);
+  const [selectionMode, setSelectionMode] = useState<'none' | 'origin' | 'destination'>('none');
+  
+  // Form fields
+  const [newRouteTitle, setNewRouteTitle] = useState('');
+  const [newRouteOrigin, setNewRouteOrigin] = useState('');
+  const [originCoords, setOriginCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [newRouteDest, setNewRouteDest] = useState('');
+  const [destCoords, setDestCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [originSuggestions, setOriginSuggestions] = useState<any[]>([]);
+  const [destSuggestions, setDestSuggestions] = useState<any[]>([]);
+  const [isSearchingOrigin, setIsSearchingOrigin] = useState(false);
+  const [isSearchingDest, setIsSearchingDest] = useState(false);
+  const [isSavingRoute, setIsSavingRoute] = useState(false);
+
+  // Editing state
+  const [editingRouteId, setEditingRouteId] = useState<string | number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [isCheckingTrafficId, setIsCheckingTrafficId] = useState<string | number | null>(null);
+
+  // Fetch saved routes on mount
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingRoutes(true);
+    fetchSavedRoutes()
+      .then((routes) => {
+        if (!isMounted) return;
+        setSavedRoutes(routes);
+        if (routes.length > 0 && selectedRouteId === null) {
+          setSelectedRouteId(routes[0].id);
+        }
+      })
+      .finally(() => {
+        if (isMounted) setIsLoadingRoutes(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const { traffic, location } = liveIntel;
-  const shortArea = selectedArea.split(',')[0]?.trim() || selectedArea;
+  const { shortArea, displayArea } = sanitizeAreaName(selectedArea);
   const cctvImages = [
-    './assets/crops/cctv-rohini.webp',
-    './assets/crops/cctv-pitampura.webp',
-    './assets/crops/cctv-mukarba.webp',
+    '/assets/crops/cctv-rohini.webp',
+    '/assets/crops/cctv-pitampura.webp',
+    '/assets/crops/cctv-mukarba.webp',
   ];
+
+  const activeSelectedRoute = savedRoutes.find((r) => String(r.id) === String(selectedRouteId)) || null;
+
+  // Autocomplete search for Origin
+  const handleOriginSearch = async (val: string) => {
+    setNewRouteOrigin(val);
+    if (val.trim().length >= 2) {
+      setIsSearchingOrigin(true);
+      try {
+        const results = await searchLocationsLive(val.trim());
+        setOriginSuggestions(results.slice(0, 5));
+      } catch {
+        setOriginSuggestions([]);
+      } finally {
+        setIsSearchingOrigin(false);
+      }
+    } else {
+      setOriginSuggestions([]);
+    }
+  };
+
+  // Autocomplete search for Destination
+  const handleDestSearch = async (val: string) => {
+    setNewRouteDest(val);
+    if (val.trim().length >= 2) {
+      setIsSearchingDest(true);
+      try {
+        const results = await searchLocationsLive(val.trim());
+        setDestSuggestions(results.slice(0, 5));
+      } catch {
+        setDestSuggestions([]);
+      } finally {
+        setIsSearchingDest(false);
+      }
+    } else {
+      setDestSuggestions([]);
+    }
+  };
+
+  // Use Current GPS Location for Origin
+  const handleUseCurrentLocationForOrigin = () => {
+    if (location?.lat && location?.lng) {
+      setNewRouteOrigin(shortArea);
+      setOriginCoords({ lat: location.lat, lng: location.lng });
+      setOriginSuggestions([]);
+    }
+  };
+
+  // Handle map click for selecting Origin or Destination
+  const handleMapClickLocation = async (coords: { lat: number; lng: number }) => {
+    const defaultLabel = `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`;
+    let resolvedLabel = defaultLabel;
+    try {
+      const res = await fetch(`/api/v1/maps/reverse-geocode?lat=${coords.lat}&lon=${coords.lng}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.results?.[0]?.formatted_address) {
+          resolvedLabel = data.results[0].formatted_address.split(',')[0];
+        }
+      }
+    } catch {}
+
+    if (selectionMode === 'origin') {
+      setNewRouteOrigin(resolvedLabel);
+      setOriginCoords(coords);
+      setSelectionMode('none');
+    } else if (selectionMode === 'destination') {
+      setNewRouteDest(resolvedLabel);
+      setDestCoords(coords);
+      setSelectionMode('none');
+    }
+  };
+
+  // Save new route
+  const handleSaveRoute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRouteTitle.trim() || !newRouteOrigin.trim() || !newRouteDest.trim()) return;
+
+    setIsSavingRoute(true);
+    try {
+      const oCoords = originCoords || { lat: location?.lat || 28.7144, lng: location?.lng || 77.1197 };
+      const dCoords = destCoords || { lat: 28.6304, lng: 77.2177 };
+
+      const saved = await createSavedRoute({
+        title: newRouteTitle.trim(),
+        origin_name: newRouteOrigin.trim(),
+        origin_lat: oCoords.lat,
+        origin_lng: oCoords.lng,
+        destination_name: newRouteDest.trim(),
+        destination_lat: dCoords.lat,
+        destination_lng: dCoords.lng,
+      });
+
+      const updated = [saved, ...savedRoutes.filter((r) => r.id !== saved.id)];
+      setSavedRoutes(updated);
+      setSelectedRouteId(saved.id);
+      setIsAddingRoute(false);
+      setNewRouteTitle('');
+      setNewRouteOrigin('');
+      setOriginCoords(null);
+      setNewRouteDest('');
+      setDestCoords(null);
+      setOriginSuggestions([]);
+      setDestSuggestions([]);
+    } finally {
+      setIsSavingRoute(false);
+    }
+  };
+
+  // Trigger on-demand live traffic check
+  const handleCheckTraffic = async (routeId: string | number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setIsCheckingTrafficId(routeId);
+    try {
+      const updated = await checkRouteTraffic(routeId);
+      if (updated) {
+        setSavedRoutes((prev) => prev.map((r) => (String(r.id) === String(routeId) ? updated : r)));
+      }
+    } finally {
+      setIsCheckingTrafficId(null);
+    }
+  };
+
+  // Rename route
+  const handleSaveRename = async (routeId: string | number) => {
+    if (!editTitle.trim()) return;
+    const updated = await updateSavedRoute(routeId, { title: editTitle.trim() });
+    if (updated) {
+      setSavedRoutes((prev) => prev.map((r) => (String(r.id) === String(routeId) ? updated : r)));
+    }
+    setEditingRouteId(null);
+    setEditTitle('');
+  };
+
+  // Delete route
+  const handleDeleteRoute = async (routeId: string | number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (window.confirm('Are you sure you want to delete this saved route?')) {
+      const ok = await deleteSavedRoute(routeId);
+      if (ok) {
+        const remaining = savedRoutes.filter((r) => String(r.id) !== String(routeId));
+        setSavedRoutes(remaining);
+        if (String(selectedRouteId) === String(routeId)) {
+          setSelectedRouteId(remaining.length > 0 ? remaining[0].id : null);
+        }
+      }
+    }
+  };
+
+  const formatLastUpdated = (iso?: string | null) => {
+    if (!iso) return 'Not checked yet';
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const diffMins = Math.floor((now.getTime() - d.getTime()) / 60000);
+      if (diffMins < 1) return 'Updated just now';
+      if (diffMins === 1) return 'Updated 1 min ago';
+      if (diffMins < 60) return `Updated ${diffMins} mins ago`;
+      return `Updated at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    } catch {
+      return 'Updated recently';
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -1122,7 +1393,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
         tag={
           <>
             <MapPin className="w-3.5 h-3.5 text-blue-300" />
-            <span>{selectedArea}</span>
+            <span>{displayArea}</span>
           </>
         }
         title={
@@ -1130,7 +1401,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
             Traffic in <span className="text-[#93C5FD]">{shortArea}</span>
           </>
         }
-        description={`Real-time road corridor speeds, incident alerts and route times powered by ${traffic.source}.`}
+        description="Real-time road corridor speeds, incident alerts, and route times across your area."
         bottomPills={[
           { icon: <span>🚗</span>, label: 'Live Traffic', active: true },
           { icon: <span>🔀</span>, label: 'Best Routes' },
@@ -1148,6 +1419,372 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
           onAsk: onAskAi,
         }}
       />
+
+      {/* ROUTE SETUP & DAILY TRAFFIC TRACKER */}
+      <div className="bg-white rounded-2xl p-5 shadow-card border border-slate-200/80 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="w-8 h-8 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
+                🛣️
+              </span>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  Daily Routes & Traffic Conditions
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Save multiple commutes (Home to College, Office), check live traffic on demand, and inspect alternate routes.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsAddingRoute(!isAddingRoute);
+                if (!newRouteOrigin) {
+                  setNewRouteOrigin(shortArea);
+                  if (location?.lat && location?.lng) {
+                    setOriginCoords({ lat: location.lat, lng: location.lng });
+                  }
+                }
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{isAddingRoute ? 'Close Form' : 'Set Up New Route'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Add Route Form */}
+        {isAddingRoute && (
+          <form onSubmit={handleSaveRoute} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3 animate-in fade-in">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                <Navigation className="w-3.5 h-3.5 text-blue-600" />
+                Configure New Commute Route
+              </h4>
+              <span className="text-[11px] text-slate-500">Search address or pick directly on map below</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Route Nickname */}
+              <div>
+                <label className="text-[11px] font-bold text-slate-600">Route Nickname *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Home to College, Office Commute"
+                  value={newRouteTitle}
+                  onChange={(e) => setNewRouteTitle(e.target.value)}
+                  className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              {/* Location A (Origin) */}
+              <div className="relative">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600">Location A (Origin) *</label>
+                  <div className="flex items-center gap-1 text-[10px]">
+                    <button
+                      type="button"
+                      onClick={handleUseCurrentLocationForOrigin}
+                      className="text-blue-600 hover:underline font-semibold cursor-pointer"
+                    >
+                      Use GPS
+                    </button>
+                    <span>•</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectionMode(selectionMode === 'origin' ? 'none' : 'origin')}
+                      className={`font-semibold cursor-pointer ${
+                        selectionMode === 'origin' ? 'text-amber-600 underline' : 'text-slate-500 hover:text-blue-600'
+                      }`}
+                    >
+                      {selectionMode === 'origin' ? 'Click Map...' : 'Pick on Map'}
+                    </button>
+                  </div>
+                </div>
+                <input
+                  type="text"
+                  required
+                  placeholder="Search starting area..."
+                  value={newRouteOrigin}
+                  onChange={(e) => handleOriginSearch(e.target.value)}
+                  className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                {originSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 z-30 mt-1 bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                    {originSuggestions.map((s, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          setNewRouteOrigin(s.areaName || s.label);
+                          setOriginCoords(s.coords);
+                          setOriginSuggestions([]);
+                        }}
+                        className="px-3 py-2 text-xs hover:bg-blue-50 cursor-pointer flex items-center justify-between"
+                      >
+                        <span className="font-semibold text-slate-800">{s.label}</span>
+                        <span className="text-[10px] text-slate-400">{s.pincode ? `PIN ${s.pincode}` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Location B (Destination) */}
+              <div className="relative">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600">Location B (Destination) *</label>
+                  <button
+                    type="button"
+                    onClick={() => setSelectionMode(selectionMode === 'destination' ? 'none' : 'destination')}
+                    className={`text-[10px] font-semibold cursor-pointer ${
+                      selectionMode === 'destination' ? 'text-amber-600 underline' : 'text-slate-500 hover:text-blue-600'
+                    }`}
+                  >
+                    {selectionMode === 'destination' ? 'Click Map...' : 'Pick on Map'}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  required
+                  placeholder="Search destination..."
+                  value={newRouteDest}
+                  onChange={(e) => handleDestSearch(e.target.value)}
+                  className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                {destSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 z-30 mt-1 bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                    {destSuggestions.map((s, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          setNewRouteDest(s.areaName || s.label);
+                          setDestCoords(s.coords);
+                          setDestSuggestions([]);
+                        }}
+                        className="px-3 py-2 text-xs hover:bg-blue-50 cursor-pointer flex items-center justify-between"
+                      >
+                        <span className="font-semibold text-slate-800">{s.label}</span>
+                        <span className="text-[10px] text-slate-400">{s.pincode ? `PIN ${s.pincode}` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-1">
+              <p className="text-[11px] text-slate-500">
+                Routes are saved securely to your account and remain available across logins.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddingRoute(false);
+                    setSelectionMode('none');
+                  }}
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-100 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingRoute}
+                  className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs"
+                >
+                  {isSavingRoute ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  <span>Save Route</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
+
+        {/* Saved Routes Cards Grid */}
+        {savedRoutes.length === 0 ? (
+          <div className="py-8 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+            <span className="text-3xl">🛣️</span>
+            <h4 className="text-sm font-bold text-slate-800 mt-2">No Saved Routes Yet</h4>
+            <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
+              Set up your daily office commute or college route to get instant live traffic updates, estimated delays, and alternative paths.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setIsAddingRoute(true);
+                setNewRouteOrigin(shortArea);
+              }}
+              className="mt-3 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Create Your First Commute Route</span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {savedRoutes.map((rt) => {
+              const isSelected = String(selectedRouteId) === String(rt.id);
+              const isEditing = editingRouteId === rt.id;
+              const isChecking = isCheckingTrafficId === rt.id;
+              const isHeavy = rt.congestion_level === 'Heavy';
+              const isModerate = rt.congestion_level === 'Moderate';
+
+              return (
+                <div
+                  key={rt.id}
+                  onClick={() => setSelectedRouteId(rt.id)}
+                  className={`p-4 rounded-2xl border transition cursor-pointer flex flex-col justify-between ${
+                    isSelected
+                      ? 'bg-blue-50/70 border-blue-400 shadow-xs ring-2 ring-blue-500/20'
+                      : 'bg-slate-50/60 hover:bg-slate-100/70 border-slate-200'
+                  }`}
+                >
+                  <div>
+                    {/* Header: Title and Congestion Status */}
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      {isEditing ? (
+                        <div className="flex items-center gap-1 flex-1" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="text"
+                            value={editTitle}
+                            onChange={(e) => setEditTitle(e.target.value)}
+                            className="px-2 py-1 text-xs border border-blue-400 rounded-lg bg-white w-full font-bold focus:outline-none"
+                            placeholder="Enter new name"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveRename(rt.id)}
+                            className="p-1 text-emerald-600 hover:bg-emerald-50 rounded"
+                            title="Save"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingRouteId(null)}
+                            className="p-1 text-slate-400 hover:bg-slate-100 rounded"
+                            title="Cancel"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs font-black text-slate-900 truncate">{rt.title}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingRouteId(rt.id);
+                              setEditTitle(rt.title);
+                            }}
+                            className="p-1 text-slate-400 hover:text-blue-600 rounded transition"
+                            title="Rename Route"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
+
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-black border shrink-0 ${
+                          isHeavy
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : isModerate
+                            ? 'bg-amber-50 text-amber-700 border-amber-200'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}
+                      >
+                        {isHeavy ? '🔴 Heavy Delays' : isModerate ? '🟡 Moderate' : '🟢 Smooth Flow'}
+                      </span>
+                    </div>
+
+                    {/* Route Points */}
+                    <div className="space-y-1 text-xs mb-3">
+                      <div className="flex items-start gap-1.5 text-slate-700">
+                        <span className="text-blue-600 font-black shrink-0">A:</span>
+                        <span className="truncate">{rt.origin_name}</span>
+                      </div>
+                      <div className="flex items-start gap-1.5 text-slate-700">
+                        <span className="text-emerald-600 font-black shrink-0">B:</span>
+                        <span className="truncate">{rt.destination_name}</span>
+                      </div>
+                    </div>
+
+                    {/* Alternative summary if present */}
+                    {rt.alternative_summary && (
+                      <div className="text-[10px] text-slate-500 bg-white/80 p-1.5 rounded-lg border border-slate-200/70 mb-2 truncate">
+                        <span className="font-bold text-slate-700">Alt:</span> {rt.alternative_summary}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer: Metrics & Actions */}
+                  <div className="pt-2 border-t border-slate-200/70 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <div>
+                        <span className="font-extrabold text-slate-900">
+                          {rt.current_duration_mins || rt.typical_duration_mins} mins
+                        </span>
+                        <span className="text-[11px] text-slate-500 ml-1">
+                          ({rt.distance_km} km {rt.delay_minutes > 0 ? `• +${rt.delay_minutes}m delay` : '• on-time'})
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-400">
+                        {formatLastUpdated(rt.last_checked_at)}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1 pt-1">
+                      <button
+                        type="button"
+                        onClick={(e) => handleCheckTraffic(rt.id, e)}
+                        disabled={isChecking}
+                        className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 text-blue-600 border border-slate-200 text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                        title="Check latest live traffic right now"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isChecking ? 'animate-spin' : ''}`} />
+                        <span>{isChecking ? 'Checking...' : 'Check Traffic'}</span>
+                      </button>
+
+                      <div className="flex items-center gap-1">
+                        {isSelected ? (
+                          <span className="text-[10px] font-bold text-blue-600 bg-blue-100/60 px-2 py-0.5 rounded">
+                            On Map ✓
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-500 font-semibold hover:text-blue-600">
+                            Show Map ›
+                          </span>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteRoute(rt.id, e)}
+                          className="p-1 text-slate-400 hover:text-rose-600 rounded transition"
+                          title="Delete Route"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
         {/* Left 7 cols */}
@@ -1208,7 +1845,10 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
           {/* Live Traffic Map */}
           <div className="bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-extrabold text-slate-900">Live Traffic Map ({shortArea})</h3>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">Live Traffic Map ({shortArea})</h3>
+                <p className="text-[11px] text-slate-500">Live Google Maps TrafficLayer with real-time congestion and incidents</p>
+              </div>
               <div className="flex gap-1.5">
                 {(['Live Traffic', 'Incidents', 'Corridors'] as const).map((b) => (
                   <button
@@ -1224,20 +1864,56 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
                 ))}
               </div>
             </div>
-            <InteractiveMap
-              heightClass="h-64"
-              coords={{ lat: location.lat, lng: location.lng }}
-              centerLabel={`${shortArea}\nAvg ${traffic.averageSpeedKmh} km/h`}
+            <GoogleMapsTrafficModule
+              coords={{ lat: location?.lat || 28.6139, lng: location?.lng || 77.2090 }}
+              areaName={shortArea}
               trafficStatusLabel={`${traffic.congestionLevel} Traffic (${traffic.averageSpeedKmh} km/h)`}
-              showSearchOverlay
-              showSearchBottomButton={false}
-              showTrafficRoutes
-              showLegendBar={[
-                { label: 'Fast', color: 'bg-emerald-500' },
-                { label: 'Moderate', color: 'bg-amber-400' },
-                { label: 'Slow', color: 'bg-orange-500' },
-                { label: 'Heavy', color: 'bg-rose-600' },
-              ]}
+              averageSpeedKmh={traffic.averageSpeedKmh}
+              congestionLevel={traffic.congestionLevel}
+              incidents={traffic.incidents}
+              corridors={traffic.corridors}
+              filterMode={trafficMapFilter}
+              onFilterModeChange={setTrafficMapFilter}
+              heightClass="h-[420px]"
+              activeRoute={
+                activeSelectedRoute
+                  ? {
+                      origin:
+                        activeSelectedRoute.origin_lat && activeSelectedRoute.origin_lng
+                          ? { lat: activeSelectedRoute.origin_lat, lng: activeSelectedRoute.origin_lng }
+                          : activeSelectedRoute.origin_name,
+                      destination:
+                        activeSelectedRoute.destination_lat && activeSelectedRoute.destination_lng
+                          ? { lat: activeSelectedRoute.destination_lat, lng: activeSelectedRoute.destination_lng }
+                          : activeSelectedRoute.destination_name,
+                      title: activeSelectedRoute.title,
+                    }
+                  : null
+              }
+              selectionMode={selectionMode}
+              onMapLocationSelected={handleMapClickLocation}
+              onRouteCalculated={(info) => {
+                if (activeSelectedRoute) {
+                  setSavedRoutes((prev) =>
+                    prev.map((r) =>
+                      String(r.id) === String(activeSelectedRoute.id)
+                        ? {
+                            ...r,
+                            distance_km: info.distanceKm,
+                            typical_duration_mins: info.durationMins,
+                            current_duration_mins: info.trafficDurationMins,
+                            delay_minutes: info.delayMins,
+                            congestion_level: info.congestion as any,
+                            alternative_summary:
+                              info.alternatives.length > 0
+                                ? `Via ${info.alternatives[0].summary} (${info.alternatives[0].distanceKm} km, ${info.alternatives[0].durationMins}m)`
+                                : r.alternative_summary,
+                          }
+                        : r
+                    )
+                  );
+                }
+              }}
             />
           </div>
 
@@ -1246,7 +1922,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
             <div className="md:col-span-6 bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
               <div className="flex items-center justify-between mb-2.5">
                 <h3 className="text-sm font-extrabold text-slate-900">Live Corridor Incidents</h3>
-                <span className="text-[10px] font-semibold text-emerald-600">● {traffic.source}</span>
+                <span className={`text-[10px] font-semibold ${traffic.isSimulated ? 'text-amber-600' : 'text-emerald-600'}`}>● {traffic.isSimulated ? 'Estimated Road Status' : 'Live Road Status'}</span>
               </div>
               <div className="space-y-2.5">
                 {traffic.incidents.length > 0 ? (
@@ -1269,7 +1945,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
 
             <div className="md:col-span-6 bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
               <div className="flex items-center justify-between mb-2.5">
-                <h3 className="text-sm font-extrabold text-slate-900">📹 Corridor Telemetry</h3>
+                <h3 className="text-sm font-extrabold text-slate-900">📹 Key Road Conditions</h3>
                 <span className="text-[10px] font-semibold text-blue-600">Inspect ›</span>
               </div>
               {traffic.corridors.length > 0 ? (
@@ -1281,10 +1957,10 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
                         key={cor.id}
                         onClick={() =>
                           onOpenModal({
-                            title: `Corridor Telemetry — ${cor.roadName}`,
-                            category: 'Live Arterial Sensor',
+                            title: `Road Conditions — ${cor.roadName}`,
+                            category: 'Road Traffic Status',
                             badge: `${cor.speedKmh} km/h (${cor.status})`,
-                            location: `${cor.roadName}, ${selectedArea}`,
+                            location: `${cor.roadName}, ${displayArea}`,
                             description: `${cor.description}. Distance from your pin: ${cor.distanceKm} km. Estimated delay: ${
                               cor.delayMinutes > 0 ? `+${cor.delayMinutes} mins` : 'On time'
                             }.`,
@@ -1292,13 +1968,29 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
                             image: img,
                           })
                         }
-                        className="cursor-pointer rounded-xl border border-slate-200/80 overflow-hidden bg-slate-50 hover:border-blue-400 transition"
+                        className="cursor-pointer rounded-xl border border-slate-200/80 overflow-hidden bg-slate-900 hover:border-blue-400 transition group flex flex-col justify-between"
                       >
-                        <img src={img} alt={cor.roadName} className="w-full h-20 object-cover" />
-                        <div className="p-1.5">
-                          <p className="text-[11px] font-bold text-slate-900 truncate">{cor.roadName}</p>
+                        <div className="relative w-full h-20 bg-slate-800 flex items-center justify-center overflow-hidden">
+                          <img
+                            src={img}
+                            alt={cor.roadName}
+                            className="w-full h-20 object-cover opacity-90 group-hover:scale-105 transition-transform"
+                            onError={(e) => {
+                              (e.target as HTMLElement).style.display = 'none';
+                            }}
+                          />
+                          <div className="absolute top-1 left-1 flex items-center gap-1 bg-black/70 backdrop-blur-xs px-1.5 py-0.5 rounded text-[8px] font-mono text-emerald-400 font-bold">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            <span>CAM {idx + 1}</span>
+                          </div>
+                          <div className="absolute bottom-1 right-1 bg-black/70 backdrop-blur-xs px-1.5 py-0.5 rounded text-[8px] font-bold text-white">
+                            {cor.speedKmh} km/h
+                          </div>
+                        </div>
+                        <div className="p-1.5 bg-white border-t border-slate-100">
+                          <p className="text-[11px] font-bold text-slate-900 truncate" title={cor.roadName}>{cor.roadName}</p>
                           <p className="text-[9px] font-bold text-emerald-600">
-                            ● {cor.speedKmh} km/h ({cor.status})
+                            ● {cor.status}
                           </p>
                         </div>
                       </div>
@@ -1308,7 +2000,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
               ) : (
                 <div className="py-6 px-4 text-center rounded-xl bg-slate-50 border border-slate-100">
                   <p className="text-xs font-bold text-slate-600">No Active Corridor Bottlenecks in {shortArea}</p>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Local arterial traffic is flowing normally • Awaiting live sensor feeds</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Traffic is flowing smoothly on key roads in this area.</p>
                 </div>
               )}
             </div>
@@ -1322,7 +2014,7 @@ export const TrafficDashboard: React.FC<DashboardCommonProps> = ({
               <h3 className="text-sm font-extrabold text-slate-900">
                 Traffic at Key Roads Near {shortArea}
               </h3>
-              <span className="text-[10px] font-semibold text-emerald-600">● OSM + TomTom</span>
+              <span className="text-[10px] font-semibold text-emerald-600">● Live Road Network</span>
             </div>
             <div className="space-y-2.5">
               {traffic.corridors.length > 0 ? (
@@ -1425,7 +2117,7 @@ export const AlertsDashboard: React.FC<
   const [feedTab, setFeedTab] = useState<'All' | 'Official Alerts' | 'Civic Bulletins'>(initialTab);
   const [selectedCat, setSelectedCat] = useState('All Categories');
   const { alerts, communitySignals } = liveIntel;
-  const shortArea = selectedArea.split(',')[0]?.trim() || selectedArea;
+  const { shortArea, displayArea } = sanitizeAreaName(selectedArea);
 
   // Dynamic Municipal & RWA Civic Bulletins from backend intelligence alerts / community signals
   const civicBulletins = alerts.filter(
@@ -1461,7 +2153,7 @@ export const AlertsDashboard: React.FC<
             Alerts & <span className="text-[#93C5FD]">Civic Notices</span>
           </>
         }
-        description="Unified feed of official NDMA SACHET disaster warnings, live telemetry threshold breaches, and municipal/RWA civic announcements for your locality."
+        description="Official emergency warnings, severe weather notices, and municipal civic announcements for your locality."
         bottomPills={[
           'All Categories',
           'Weather',
@@ -1500,7 +2192,7 @@ export const AlertsDashboard: React.FC<
                 {tab === 'All'
                   ? `All Notices (${alerts.length + civicBulletins.length})`
                   : tab === 'Official Alerts'
-                  ? `🔔 Live Sensor & NDMA Alerts (${alerts.length})`
+                  ? `🔔 Emergency & Weather Alerts (${alerts.length})`
                   : `🏛️ Municipal & RWA Bulletins (${civicBulletins.length})`}
               </button>
             ))}
@@ -1561,7 +2253,7 @@ export const AlertsDashboard: React.FC<
           <div className="flex items-center justify-between mb-3.5">
             <h3 className="text-sm font-extrabold text-slate-900">
               {feedTab === 'Official Alerts'
-                ? `🔔 Active NDMA & Telemetry Alerts (${shortArea})`
+                ? `🔔 Active Emergency & Local Alerts (${shortArea})`
                 : feedTab === 'Civic Bulletins'
                 ? `🏛️ Official Municipal & RWA Bulletins (${shortArea})`
                 : `📢 Unified Alerts & Civic Feed (${shortArea})`}
@@ -1572,46 +2264,11 @@ export const AlertsDashboard: React.FC<
           <div className="space-y-3">
             {filteredFeed.length > 0 ? (
               filteredFeed.map((ra) => (
-                <div
+                <AlertBanner
                   key={ra.id}
-                  onClick={() =>
-                    onOpenModal({
-                      title: ra.title,
-                      category: `${ra.category} • ${ra.sender}`,
-                      badge: ra.severity,
-                      location: ra.areaDescription,
-                      description: `${ra.description}${
-                        ra.instruction ? `\n\nRecommended Action: ${ra.instruction}` : ''
-                      }`,
-                      primaryActionLabel: 'Ask AI About This Notice',
-                    })
-                  }
-                  className="cursor-pointer p-3.5 rounded-2xl border border-slate-200/80 hover:border-blue-400 bg-slate-50/50 hover:bg-white flex items-start justify-between gap-3 transition"
-                >
-                  <div className="flex items-start gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/60 flex items-center justify-center text-lg shrink-0 shadow-2xs">
-                      {ra.icon}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${ra.badgeClass}`}>
-                          {ra.category}
-                        </span>
-                        <span className="text-[11px] font-bold text-slate-400">
-                          {ra.sender} • {ra.timeAgo}
-                        </span>
-                      </div>
-                      <h4 className="text-xs font-extrabold text-slate-900 mt-1">{ra.title}</h4>
-                      <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">{ra.description}</p>
-                      {ra.instruction && (
-                        <p className="text-[11px] font-bold text-indigo-700 mt-1.5">
-                          ✓ Action: {ra.instruction}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-slate-400 shrink-0 mt-2" />
-                </div>
+                  alert={ra}
+                  onOpenModal={onOpenModal}
+                />
               ))
             ) : (
               <div className="py-12 text-center text-slate-500 bg-slate-50 rounded-2xl border border-slate-100 p-6">
@@ -1620,10 +2277,10 @@ export const AlertsDashboard: React.FC<
                 </div>
                 <p className="font-extrabold text-slate-800 text-sm">No Active Alerts or Notices for {shortArea}</p>
                 <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-                  All municipal services, water supply, and power feeders are operating normally. Real-time official bulletins will stream here via NDMA SACHET when issued.
+                  All local services, water supply, and power feeders are operating normally. New notices and emergency bulletins will appear here as they are issued.
                 </p>
                 <span className="inline-block mt-3 px-3 py-1 rounded-full bg-white text-[11px] font-semibold text-slate-600 border border-slate-200 shadow-2xs">
-                  Awaiting Live SACHET Feed & Civic Bulletin API
+                  No active notices in this locality
                 </span>
               </div>
             )}
@@ -1640,7 +2297,7 @@ export const AlertsDashboard: React.FC<
                   🏥 Nearby Hospitals & Police ({shortArea})
                 </h3>
                 <p className="text-[10px] text-slate-500">
-                  Live Overpass & `/api/v1/emergency/facilities` radius scan
+                  Verified 24/7 facilities in your immediate area
                 </p>
               </div>
               <button
@@ -1682,8 +2339,8 @@ export const AlertsDashboard: React.FC<
                           title: `Emergency Contact: ${poi.name}`,
                           category: `Verified ${poi.sublabel} • ${poi.distanceKm} km away`,
                           badge: '24/7 Active',
-                          location: `${selectedArea} (${poi.latitude.toFixed(3)}°N, ${poi.longitude.toFixed(3)}°E)`,
-                          description: `Direct Helpline: ${poi.phone || '112 / 108'}. Coordinates synced for emergency dispatch.`,
+                          location: `${poi.name}, ${selectedArea}`,
+                          description: `Direct Helpline: ${poi.phone || '112 / 108'}. Location synced for emergency dispatch.`,
                           primaryActionLabel: `Dial ${poi.phone || '112'}`,
                         })
                       }
@@ -1781,20 +2438,28 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
   selectedArea,
   liveIntel,
 }) => {
+  const { t, i18n } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
 
   // Sarvam AI / Browser Neural Voice Input (STT) & Read Aloud (TTS) State
-  const [voiceLang, setVoiceLang] = useState<'hi-IN' | 'en-IN'>('hi-IN');
+  const [voiceLang, setVoiceLang] = useState<'hi-IN' | 'en-IN'>(() =>
+    i18n.language?.startsWith('hi') ? 'hi-IN' : 'en-IN'
+  );
   const [isListening, setIsListening] = useState(false);
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
   const [autoSpeak, setAutoSpeak] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [activeStopFn, setActiveStopFn] = useState<(() => void) | null>(null);
 
+  useEffect(() => {
+    const isHi = i18n.language?.startsWith('hi');
+    setVoiceLang(isHi ? 'hi-IN' : 'en-IN');
+  }, [i18n.language]);
+
   const { weather, airQuality, traffic, alerts } = liveIntel;
-  const shortArea = selectedArea.split(',')[0]?.trim() || selectedArea;
+  const { shortArea, displayArea } = sanitizeAreaName(selectedArea);
 
   const handleSpeakMessage = async (text: string, idx: number) => {
     if (speakingIdx === idx && activeStopFn) {
@@ -1822,13 +2487,9 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
       return;
     }
     setIsListening(true);
-    setVoiceStatus(
-      voiceLang === 'hi-IN'
-        ? '🎙️ सुन रहा हूँ... हिंदी या अंग्रेजी में बोलें (Listening in Hindi/Hinglish)...'
-        : '🎙️ Listening in English (en-IN)... Speak your question now.'
-    );
+    setVoiceStatus('🎙️ Listening in English... Speak your question now.');
     const rec = startVoiceRecognition(
-      voiceLang,
+      'en-IN',
       (transcript, isFinal) => {
         setInput(transcript);
         if (isFinal && transcript.trim().length > 2) {
@@ -1853,27 +2514,66 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
     if (!q || thinking) return;
     if (!promptText) setInput('');
 
-    setMessages((prev) => [...prev, { role: 'user', text: q }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text: q },
+      { role: 'ai', text: '', keyFindings: [], recommendations: [], sources: [], confidence: '' },
+    ]);
     setThinking(true);
+
     try {
-      const res = await askLiveAiAssistant(q, liveIntel);
-      const newMsg: ChatMessage = {
-        role: 'ai',
-        text: res.responseText,
-        keyFindings: res.keyFindings,
-        recommendations: res.recommendations,
-        sources: res.sources,
-        confidence: res.confidence,
-      };
-      setMessages((prev) => {
-        const next = [...prev, newMsg];
-        if (autoSpeak) {
-          setTimeout(() => {
-            handleSpeakMessage(res.responseText, next.length - 1);
-          }, 150);
+      await streamLiveAiAssistant(
+        q,
+        liveIntel,
+        {
+          onChunk: (accumulated) => {
+            setThinking(false);
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.role === 'ai') {
+                copy[copy.length - 1] = { ...last, text: accumulated };
+              }
+              return copy;
+            });
+          },
+          onMetadata: (meta) => {
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.role === 'ai') {
+                copy[copy.length - 1] = { ...last, ...meta };
+              }
+              return copy;
+            });
+          },
+          onDone: (res) => {
+            setThinking(false);
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.role === 'ai') {
+                copy[copy.length - 1] = {
+                  role: 'ai',
+                  text: res.responseText,
+                  keyFindings: res.keyFindings,
+                  recommendations: res.recommendations,
+                  sources: res.sources,
+                  confidence: res.confidence,
+                };
+              }
+              if (autoSpeak) {
+                setTimeout(() => {
+                  handleSpeakMessage(res.responseText, copy.length - 1);
+                }, 150);
+              }
+              return copy;
+            });
+          },
         }
-        return next;
-      });
+      );
+    } catch (err) {
+      console.error('[AiAssistantDashboard] Error streaming Saathi AI response:', err);
     } finally {
       setThinking(false);
     }
@@ -1884,13 +2584,12 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
       <HeroBanner
         dashboardId="ai-assistant"
         title="AI Assistant (Saathi AI)"
-        subtitle="Your Smart Companion Grounded in Live Weather, CPCB AQI, Traffic, SACHET Alerts & Sarvam AI Voice"
+        subtitle="Your neighborhood assistant for local weather, air quality, traffic, and community updates"
         bottomPills={[
           {
             icon: <span>🎙️</span>,
-            label: voiceLang === 'hi-IN' ? 'Voice: हिंदी / Hinglish (hi-IN)' : 'Voice: English (en-IN)',
+            label: 'Voice: English (en-IN)',
             active: true,
-            onClick: () => setVoiceLang((l) => (l === 'hi-IN' ? 'en-IN' : 'hi-IN')),
           },
           {
             icon: <span>🔊</span>,
@@ -1908,10 +2607,10 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
               className="w-16 h-16 rounded-xl object-contain bg-white/90 p-1 shrink-0"
             />
             <div className="bg-white text-slate-900 rounded-xl p-2.5 text-xs shadow">
-              <p className="font-medium">नमस्ते / Hi! I'm</p>
-              <p className="font-extrabold text-indigo-700">MyArea24 Saathi AI.</p>
+              <p className="font-medium">Hi! I'm</p>
+              <p className="font-extrabold text-indigo-700">MyArea24 Assistant.</p>
               <p className="text-[11px] text-slate-600">
-                Voice & Text in हिंदी / English ({weather.temperatureC}°C, AQI {airQuality.aqiValue})
+                Local Intelligence for {shortArea} ({weather.temperatureC}°C, AQI {airQuality.aqiValue})
               </p>
             </div>
           </div>
@@ -1932,18 +2631,14 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                     Chat or Speak with MyArea24 AI ({shortArea})
                   </h3>
                   <p className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
-                    <Radio className="w-3 h-3" /> Sarvam AI (Saarika STT & Bulbul TTS) + Live Telemetry RAG
+                    <Radio className="w-3 h-3" /> Voice & Text Assistant with Local Insights
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setVoiceLang((l) => (l === 'hi-IN' ? 'en-IN' : 'hi-IN'))}
-                  className="px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-extrabold cursor-pointer transition"
-                >
-                  {voiceLang === 'hi-IN' ? '🇮🇳 हिंदी (hi-IN)' : '🇬🇧 English (en-IN)'}
-                </button>
+                <span className="px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-bold">
+                  🇬🇧 English (en-IN)
+                </span>
                 {messages.length > 0 && (
                   <button
                     type="button"
@@ -1972,7 +2667,7 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
             {/* Greeting Box with Compact Live Telemetry Context */}
             <div className="bg-slate-50/90 rounded-2xl p-4 border border-slate-200/60 mb-4">
               <p className="text-xs font-extrabold text-slate-900">
-                Hello Divyansh! 👋 Active Telemetry Context for <span className="text-indigo-600">{selectedArea}</span>:
+                Hello {getStoredAuthUser()?.fullName ? getStoredAuthUser()!.fullName.split(' ')[0] : 'Resident'}! 👋 Current conditions in <span className="text-indigo-600">{selectedArea}</span>:
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5">
                 <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-[11px]">
@@ -1982,7 +2677,7 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                   </span>
                 </div>
                 <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-[11px]">
-                  <span className="text-slate-400 block text-[9px]">CPCB AIR QUALITY</span>
+                  <span className="text-slate-400 block text-[9px]">AIR QUALITY</span>
                   <span className="font-extrabold text-slate-900">
                     AQI {airQuality.aqiValue} ({airQuality.aqiCategory})
                   </span>
@@ -2018,36 +2713,48 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                           : 'bg-indigo-50/80 text-slate-800 border border-indigo-100 space-y-2'
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <p className="whitespace-pre-line">{m.text}</p>
-                        {m.role === 'ai' && (
-                          <button
-                            type="button"
-                            onClick={() => handleSpeakMessage(m.text, idx)}
-                            title="Listen in Hindi / English (Sarvam AI TTS)"
-                            className={`px-2 py-1 rounded-lg text-[10px] font-extrabold flex items-center gap-1 shrink-0 transition cursor-pointer ${
-                              speakingIdx === idx
-                                ? 'bg-rose-600 text-white'
-                                : 'bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
-                            }`}
-                          >
-                            {speakingIdx === idx ? (
-                              <>
-                                <VolumeX className="w-3.5 h-3.5" /> Stop
-                              </>
-                            ) : (
-                              <>
-                                <Volume2 className="w-3.5 h-3.5" /> 🔊 सुने / Listen
-                              </>
+                      {m.role === 'ai' && !m.text ? (
+                        <div className="flex items-center gap-2 text-indigo-700 font-bold text-xs py-1">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          <span>Saathi is thinking & checking verified local sensors...</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="whitespace-pre-line">
+                            {m.text}
+                            {thinking && idx === messages.length - 1 && (
+                              <span className="inline-block w-1.5 h-3.5 bg-indigo-600 ml-1 animate-pulse align-middle" />
                             )}
-                          </button>
-                        )}
-                      </div>
+                          </p>
+                          {m.role === 'ai' && m.text && (
+                            <button
+                              type="button"
+                              onClick={() => handleSpeakMessage(m.text, idx)}
+                              title="Listen in Hindi / English (Neural Voice)"
+                              className={`px-2 py-1 rounded-lg text-[10px] font-extrabold flex items-center gap-1 shrink-0 transition cursor-pointer ${
+                                speakingIdx === idx
+                                  ? 'bg-rose-600 text-white'
+                                  : 'bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                              }`}
+                            >
+                              {speakingIdx === idx ? (
+                                <>
+                                  <VolumeX className="w-3.5 h-3.5" /> Stop
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="w-3.5 h-3.5" /> 🔊 Listen
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      )}
 
                       {m.keyFindings && m.keyFindings.length > 0 && (
                         <div className="pt-2 border-t border-indigo-200/60">
                           <p className="text-[10px] font-extrabold text-indigo-900 uppercase tracking-wider mb-1">
-                            Key Live Telemetry Findings
+                            Key Local Highlights
                           </p>
                           <ul className="list-disc list-inside space-y-0.5 text-[11px] text-slate-700">
                             {m.keyFindings.map((kf, i) => (
@@ -2086,22 +2793,15 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                     </div>
                   </div>
                 ))}
-                {thinking && (
-                  <div className="flex justify-start">
-                    <div className="bg-indigo-50/80 text-indigo-700 border border-indigo-100 rounded-2xl px-4 py-2.5 text-xs font-semibold flex items-center gap-2">
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Synthesizing live telemetry for {shortArea}...</span>
-                    </div>
-                  </div>
-                )}
+
               </div>
             )}
 
-            {/* 6 Suggested Prompt Cards (2x3) including Hindi / Hinglish Prompt */}
+            {/* 6 Suggested Prompt Cards (2x3) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-4">
               {[
                 { icon: '🌤️', text: `What's the weather and AQI like right now in ${shortArea}?` },
-                { icon: '🇮🇳', text: `${shortArea} में आज मौसम, ट्रैफिक और मंडी के भाव कैसे हैं?` },
+                { icon: '📊', text: `How are the traffic, weather and market rates today in ${shortArea}?` },
                 { icon: '🏃', text: `Is it safe to go for a jog outdoors in ${shortArea} right now?` },
                 { icon: '🏥', text: `Find nearby hospitals and pharmacies open in ${shortArea}` },
                 { icon: '🚗', text: `Are there any traffic jams on roads near ${shortArea}?` },
@@ -2119,7 +2819,7 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
               ))}
             </div>
 
-            {/* Chat Input Bar with Sarvam AI Voice Input Button */}
+            {/* Chat Input Bar */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -2132,17 +2832,13 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={
-                  voiceLang === 'hi-IN'
-                    ? `${shortArea} के बारे में हिंदी या English में पूछें...`
-                    : `Ask anything about ${shortArea}...`
-                }
+                placeholder={`Ask anything about ${shortArea}...`}
                 className="flex-1 bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none"
               />
               <button
                 type="button"
                 onClick={handleToggleMic}
-                title={`Voice Input (${voiceLang === 'hi-IN' ? 'Hindi' : 'English'})`}
+                title="Voice Input (English)"
                 className={`px-2.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1 transition cursor-pointer ${
                   isListening
                     ? 'bg-rose-600 text-white animate-pulse'
@@ -2150,7 +2846,7 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
                 }`}
               >
                 <Mic className="w-3.5 h-3.5" />
-                <span>{isListening ? 'Listening...' : voiceLang === 'hi-IN' ? 'बोलें' : 'Voice'}</span>
+                <span>{isListening ? 'Listening...' : 'Voice'}</span>
               </button>
               <button
                 type="submit"
@@ -2194,13 +2890,13 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
 
           <div className="bg-white rounded-2xl p-4 shadow-card border border-slate-200/70">
             <div className="flex items-center justify-between mb-2.5">
-              <h3 className="text-sm font-extrabold text-slate-900">💡 Citizen Decision Prompts</h3>
+              <h3 className="text-sm font-extrabold text-slate-900">💡 Suggested Questions</h3>
               <span className="text-[10px] font-semibold text-indigo-600">{shortArea}</span>
             </div>
             <div className="space-y-2">
               {[
                 `Will it rain today in ${shortArea}?`,
-                `What is the current CPCB air quality in ${shortArea}?`,
+                `What is the current air quality in ${shortArea}?`,
                 `Which roads have traffic jams near ${shortArea}?`,
                 `Find verified hospitals & pharmacies near ${shortArea}`,
                 `Is it safe to exercise outdoors right now?`,
@@ -2223,10 +2919,10 @@ export const AiAssistantDashboard: React.FC<DashboardCommonProps> = ({
             <h3 className="text-sm font-extrabold text-slate-900 mb-2.5">✨ How Saathi AI Works</h3>
             <div className="grid grid-cols-2 gap-2.5 text-xs">
               {[
-                { t: 'Zero Hallucination', s: 'Every metric is pulled from live sensors' },
-                { t: 'Sarvam AI Voice', s: 'Hindi (hi-IN) & English Speech-to-Text + TTS' },
-                { t: 'CPCB Standard', s: 'Official 2014 Indian NAQI sub-index math' },
-                { t: 'Real Road Names', s: 'Queries OpenStreetMap & TomTom corridors' },
+                { t: 'Verified Local Data', s: 'Answers are grounded in current local conditions' },
+                { t: 'Voice & Text', s: 'Supports both Hindi and English speaking' },
+                { t: 'Standard AQI Scale', s: 'Official national air quality standards' },
+                { t: 'Real-Time Traffic', s: 'Monitors current road speeds and congestion' },
               ].map((u) => (
                 <div key={u.t} className="p-2.5 rounded-xl bg-slate-50">
                   <p className="font-bold text-slate-800">{u.t}</p>

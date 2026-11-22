@@ -14,6 +14,7 @@ from backend.app.services.event_ingestion_service import (
     sync_events_for_city,
     normalize_city_name,
     resolve_city_centroid_and_name,
+    get_providers_audit_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ def sync_live_events(
 @router.get("", response_model=Dict[str, Any])
 def list_events(
     category: Optional[str] = Query(None),
+    date_filter: Optional[str] = Query("all", description="all, today, tomorrow, weekend, upcoming"),
     locality: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
     lat: Optional[float] = Query(None),
@@ -75,19 +77,19 @@ def list_events(
     q: Optional[str] = Query(None),
     sync_live: bool = Query(False),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(50, ge=1, le=250),
     db: Session = Depends(get_db),
 ):
-    # Resolve target city, locality, and coordinates across all 780+ Indian districts
-    target_loc = (city or locality or "").strip()
-    eff_lat = lat
-    eff_lon = lon
+    sync_live_bool = True if sync_live is True else False
+    target_loc = (city if isinstance(city, str) else locality if isinstance(locality, str) else "").strip()
+    eff_lat = lat if isinstance(lat, (int, float)) else None
+    eff_lon = lon if isinstance(lon, (int, float)) else None
     norm_city = ""
     norm_locality = ""
 
     if target_loc:
-        _, norm_city, norm_locality, c_lat, c_lon = resolve_city_centroid_and_name(
-            target_loc, lat=None, lon=None, locality_name=locality
+        slug, norm_city, norm_locality, c_lat, c_lon = resolve_city_centroid_and_name(
+            target_loc, lat=None, lon=None, locality_name=locality if isinstance(locality, str) else None
         )
         # If caller didn't pass lat/lon, or passed stale coordinates >100km away from the explicitly named city,
         # anchor to the resolved city centroid so we never leak events from a stale city.
@@ -97,26 +99,42 @@ def list_events(
             eff_lat, eff_lon = c_lat, c_lon
 
         norm_key = norm_city.lower()
-        city_count = db.query(Event).filter(func.lower(Event.city) == norm_key).count()
-        if sync_live or city_count < 6:
+        slug_key = (slug or "").lower()
+        city_count = db.query(Event).filter(
+            or_(
+                func.lower(Event.city) == norm_key,
+                func.lower(Event.city) == slug_key,
+                func.lower(Event.city).like(f"%{slug_key}%") if slug_key else False,
+            )
+        ).count()
+        total_events_in_db = db.query(Event).count()
+        if sync_live_bool or (city_count == 0 and total_events_in_db < 6):
             try:
                 sync_events_for_city(
                     db,
                     target_loc,
-                    force=sync_live,
+                    force=sync_live_bool,
                     lat=eff_lat,
                     lon=eff_lon,
-                    locality_name=locality or norm_locality,
+                    locality_name=locality if isinstance(locality, str) else norm_locality,
                 )
             except Exception as ex:
                 logger.warning(f"Auto-sync failed for {target_loc}: {ex}")
     elif eff_lat is not None and eff_lon is not None:
-        _, norm_city, norm_locality, _, _ = resolve_city_centroid_and_name(
-            "", lat=eff_lat, lon=eff_lon, locality_name=locality
+        slug, norm_city, norm_locality, _, _ = resolve_city_centroid_and_name(
+            "", lat=eff_lat, lon=eff_lon, locality_name=locality if isinstance(locality, str) else None
         )
         norm_key = norm_city.lower()
-        city_count = db.query(Event).filter(func.lower(Event.city) == norm_key).count()
-        if city_count < 6:
+        slug_key = (slug or "").lower()
+        city_count = db.query(Event).filter(
+            or_(
+                func.lower(Event.city) == norm_key,
+                func.lower(Event.city) == slug_key,
+                func.lower(Event.city).like(f"%{slug_key}%") if slug_key else False,
+            )
+        ).count()
+        total_events_in_db = db.query(Event).count()
+        if sync_live_bool or (city_count == 0 and total_events_in_db < 6):
             try:
                 sync_events_for_city(
                     db,
@@ -124,15 +142,47 @@ def list_events(
                     force=False,
                     lat=eff_lat,
                     lon=eff_lon,
-                    locality_name=locality or norm_locality,
+                    locality_name=locality if isinstance(locality, str) else norm_locality,
                 )
             except Exception as ex:
                 logger.warning(f"Coordinate auto-sync failed for {norm_city}: {ex}")
 
     query = db.query(Event)
 
-    # Keyword search across title, description, venue, and locality
-    if q and q.strip():
+    # Date filter: today, tomorrow, weekend, upcoming, all
+    df_clean = (date_filter or "all").strip().lower() if isinstance(date_filter, str) else "all"
+    if df_clean != "all":
+        now_dt = datetime.datetime.now()
+        today_date = now_dt.date()
+        tomorrow_date = today_date + datetime.timedelta(days=1)
+        
+        # Calculate nearest weekend (Saturday and Sunday)
+        days_until_sat = (5 - today_date.weekday()) % 7
+        sat_date = today_date + datetime.timedelta(days=days_until_sat)
+        sun_date = sat_date + datetime.timedelta(days=1)
+        if today_date.weekday() == 6:  # Today is Sunday
+            weekend_start = datetime.datetime.combine(today_date - datetime.timedelta(days=1), datetime.time.min)
+            weekend_end = datetime.datetime.combine(today_date, datetime.time.max)
+        else:
+            weekend_start = datetime.datetime.combine(sat_date, datetime.time.min)
+            weekend_end = datetime.datetime.combine(sun_date, datetime.time.max)
+
+        if df_clean == "today":
+            start_bound = datetime.datetime.combine(today_date, datetime.time.min)
+            end_bound = datetime.datetime.combine(today_date, datetime.time.max)
+            query = query.filter(Event.start_time >= start_bound, Event.start_time <= end_bound)
+        elif df_clean == "tomorrow":
+            start_bound = datetime.datetime.combine(tomorrow_date, datetime.time.min)
+            end_bound = datetime.datetime.combine(tomorrow_date, datetime.time.max)
+            query = query.filter(Event.start_time >= start_bound, Event.start_time <= end_bound)
+        elif df_clean in ("weekend", "this weekend"):
+            query = query.filter(Event.start_time >= weekend_start, Event.start_time <= weekend_end)
+        elif df_clean == "upcoming":
+            start_bound = datetime.datetime.combine(today_date, datetime.time.min)
+            query = query.filter(Event.start_time >= start_bound)
+
+    # Keyword search across title, description, venue, locality, and source
+    if q and isinstance(q, str) and q.strip():
         term = f"%{q.strip().lower()}%"
         query = query.filter(
             or_(
@@ -140,14 +190,27 @@ def list_events(
                 func.lower(Event.description).like(term),
                 func.lower(Event.venue_name).like(term),
                 func.lower(Event.locality).like(term),
+                func.lower(Event.source).like(term),
             )
         )
 
-    # Category filter with intelligent mapping for PPT Slide 05 categories
-    if category and category.strip():
+    # Category filter with comprehensive mapping across the 10 canonical event categories
+    if category and isinstance(category, str) and category.strip() and category.strip().lower() != "all events":
         cat_clean = category.strip()
         category_aliases = {
-            "Concerts & Music": ["concerts & music", "music", "concert", "sufi", "acoustic"],
+            "Hackathons & Contests": ["hackathon", "quiz", "competition", "contest", "challenge", "coding", "case study", "brabble"],
+            "Quizzes & Challenges": ["quiz", "challenge", "contest", "competition"],
+            "Festivals & Fairs": ["festivals & fairs", "festival", "fair", "panchang", "tithi", "mela", "puja", "vrat", "utsav", "diwali", "dhanteras", "ekadashi"],
+            "Movies & Cinema Announcements": ["movies & cinema announcements", "movie", "cinema", "film", "screening", "iffi", "announcement"],
+            "Theatre & Drama": ["theatre & drama", "theatre", "theater", "drama", "play", "natak", "stage"],
+            "Concerts & Music": ["concerts & music", "music", "concert", "sufi", "acoustic", "band", "live gig", "candlelight"],
+            "Comedy Shows": ["comedy shows", "comedy", "stand-up", "standup", "open mic", "laugh"],
+            "Exhibitions": ["exhibitions", "exhibition", "expo", "art gallery", "craft", "showcase", "carnival"],
+            "College Fests & Workshops": ["college fests & workshops", "college fest", "fest", "workshop", "hackathon", "campus", "seminar", "bootcamp", "training", "summit", "quiz", "competition", "challenge", "contest", "coding", "case study", "brabble"],
+            "Sports & Public Activities": ["sports & public activities", "sports", "marathon", "cricket", "football", "fitness", "yoga", "walkathon", "cyclothon"],
+            "Community Events": ["community events", "community", "meetup", "rwa", "neighbourhood", "gathering", "volunteer", "society", "civic advisory"],
+            "Family Entertainment": ["family entertainment", "family", "kids", "magic show", "carnival", "circus", "amusement", "puppet", "children"],
+            # Legacy aliases
             "Sports & Screenings": ["sports & screenings", "sports", "marathon", "fitness"],
             "Comedy": ["comedy", "stand-up", "standup", "laugh"],
             "Workshops": ["workshops", "workshop", "tech", "summit", "ai"],
@@ -169,11 +232,11 @@ def list_events(
 
     # Spatial scoring / distance calculation & strict city/locality isolation
     filtered_events: List[Tuple[Event, Optional[float]]] = []
-    effective_radius = radius_km if radius_km is not None else 50.0
+    effective_radius = float(radius_km) if isinstance(radius_km, (int, float)) else 50.0
 
     # Prepare normalized tokens for locality & city matching
     loc_tokens: List[str] = []
-    if locality and locality.strip():
+    if locality and isinstance(locality, str) and locality.strip():
         for part in locality.replace("/", ",").replace("-", ",").split(","):
             p = part.strip().lower()
             if p and len(p) >= 3:
@@ -182,7 +245,7 @@ def list_events(
             loc_tokens.append(norm_locality.lower())
 
     city_tokens: List[str] = []
-    if city and city.strip():
+    if city and isinstance(city, str) and city.strip():
         city_tokens.append(city.strip().lower())
     if norm_city and norm_city.lower() not in city_tokens:
         city_tokens.append(norm_city.lower())
@@ -218,8 +281,10 @@ def list_events(
         filtered_events.sort(key=lambda x: x[0].start_time)
 
     total = len(filtered_events)
-    start = (page - 1) * page_size
-    paged = filtered_events[start : start + page_size]
+    eff_page = int(page) if isinstance(page, int) and page >= 1 else 1
+    eff_page_size = int(page_size) if isinstance(page_size, int) and page_size >= 1 else 50
+    start = (eff_page - 1) * eff_page_size
+    paged = filtered_events[start : start + eff_page_size]
 
     return {
         "items": [
@@ -254,6 +319,32 @@ def list_events(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/providers-status")
+def get_event_providers_status():
+    """
+    Returns real-time discovery provider audit report, coverage, response counts,
+    and update frequencies for Rohini and Delhi NCR.
+    """
+    return get_providers_audit_report()
+
+
+class EventbriteOAuthTokenRequest(BaseModel):
+    code: str
+    redirect_uri: str
+
+
+@router.post("/eventbrite/token")
+def exchange_eventbrite_oauth_token(req: EventbriteOAuthTokenRequest):
+    """
+    Exchanges an Eventbrite authorization code for an OAuth access token:
+    POST https://www.eventbrite.com/oauth/token
+    grant_type=authorization_code
+    """
+    from backend.app.services.event_ingestion_service import EventbriteEventClient
+    result = EventbriteEventClient.exchange_oauth_code(code=req.code, redirect_uri=req.redirect_uri)
+    return result
 
 
 @router.get("/{event_id}")

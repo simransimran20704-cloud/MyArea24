@@ -1,14 +1,24 @@
+import copy
 import datetime
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 
 from backend.app.api.deps import get_current_user
 from backend.app.core.config import settings
+from backend.app.core.security import hash_password, verify_password, create_access_token
+from backend.app.api.businesses import generate_slug
+from backend.app.services.media_storage import save_merchant_media
+from backend.app.services.web_push_service import (
+    get_vapid_public_key,
+    send_merchant_push_notification,
+    send_web_push,
+)
 from backend.app.database.models import (
     Business,
     Product,
@@ -19,6 +29,7 @@ from backend.app.database.models import (
     Order,
     OrderItem,
     User,
+    MerchantPushSubscription,
 )
 from backend.app.database.session import get_db
 
@@ -191,6 +202,14 @@ class StorefrontUpdateRequest(BaseModel):
     closing_time: Optional[str] = None
     days_open: Optional[str] = None
     owner_name: Optional[str] = None
+    image_url: Optional[str] = None
+    cover_image: Optional[str] = None
+    logo: Optional[str] = None
+    fssai_license_number: Optional[str] = None
+    gstin: Optional[str] = None
+    settlement_upi_id: Optional[str] = None
+    settlement_bank_account: Optional[str] = None
+    settlement_bank_ifsc: Optional[str] = None
 
 
 class MerchantSettingsUpdateRequest(BaseModel):
@@ -220,6 +239,7 @@ class MerchantProductCreateRequest(BaseModel):
     availability_status: str = "in_stock"
     stock_quantity: Optional[int] = 100
     image_url: Optional[str] = None
+    image: Optional[str] = None
 
 
 class MerchantServiceCreateRequest(BaseModel):
@@ -245,6 +265,9 @@ class MerchantOfferCreateRequest(BaseModel):
     category: Optional[str] = "Food & Retail"
     valid_days: Optional[int] = 14
     valid_until: Optional[str] = None
+    image_url: Optional[str] = None
+    banner_image_url: Optional[str] = None
+    image: Optional[str] = None
 
 
 class MerchantEventCreateRequest(BaseModel):
@@ -272,6 +295,446 @@ class ReviewReplyRequest(BaseModel):
     reply_text: str
 
 
+class MerchantRegisterRequest(BaseModel):
+    business_name: str
+    category: str
+    owner_name: str
+    phone: str
+    whatsapp: Optional[str] = None
+    email: str
+    full_address: str
+    locality: str
+    city: str
+    pincode: Optional[str] = None
+    doc_type: Optional[str] = "GSTIN"
+    doc_number: Optional[str] = None
+    opening_time: Optional[str] = "09:00"
+    closing_time: Optional[str] = "21:30"
+    store_pin: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+class MerchantLoginRequest(BaseModel):
+    identifier: str
+    store_pin: str
+
+
+# ==============================================================================
+# Endpoints: 0. Merchant Onboarding & Authentication
+# ==============================================================================
+@router.post("/register", response_model=Dict[str, Any])
+def register_merchant(
+    req: MerchantRegisterRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Registers a new merchant storefront and owner account in the backend database.
+    Stores cryptographically salted password/PIN hash (never plain text) and provisions JWT credentials.
+    """
+    if len(req.store_pin.strip()) < 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store Security PIN / Password must be at least 4 characters long.",
+        )
+
+    clean_email = req.email.lower().strip()
+    clean_phone = req.phone.strip()
+    phone_digits = "".join(filter(str.isdigit, clean_phone))
+    ten_digits = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
+
+    phone_variants = [
+        clean_phone,
+        phone_digits,
+        ten_digits,
+        f"+91{ten_digits}",
+        f"0{ten_digits}",
+        f"+91-{ten_digits[:5]}-{ten_digits[5:]}",
+        f"+91 {ten_digits}",
+    ]
+
+    # Look up or create merchant user
+    user = (
+        db.query(User)
+        .filter(or_(func.lower(User.email) == clean_email, User.phone.in_(phone_variants)))
+        .first()
+    )
+    if not user and len(ten_digits) >= 10:
+        candidates = db.query(User).filter(
+            or_(
+                User.phone.like(f"%{ten_digits[:5]}%"),
+                User.phone.like(f"%{ten_digits[5:]}%"),
+            )
+        ).all()
+        for c in candidates:
+            if c.phone and "".join(filter(str.isdigit, c.phone)).endswith(ten_digits):
+                user = c
+                break
+
+    if not user:
+        user = User(
+            email=clean_email,
+            phone=clean_phone,
+            full_name=req.owner_name.strip(),
+            role="merchant",
+            is_active=True,
+            is_verified=True,
+            password_hash=hash_password(req.store_pin.strip()),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        user.role = "merchant"
+        user.full_name = req.owner_name.strip()
+        if not user.phone:
+            user.phone = clean_phone
+        user.password_hash = hash_password(req.store_pin.strip())
+        user.is_verified = True
+        db.commit()
+        db.refresh(user)
+
+    # Check if user already owns a business
+    biz = db.query(Business).filter(Business.owner_id == user.id).first()
+    if not biz:
+        slug = generate_slug(req.business_name, req.locality, db)
+        biz = Business(
+            slug=slug,
+            name=req.business_name.strip(),
+            owner_id=user.id,
+            category=req.category.strip(),
+            address=req.full_address.strip(),
+            locality=req.locality.strip(),
+            city=req.city.strip(),
+            state="Delhi NCR",
+            pincode=req.pincode.strip() if req.pincode else "110085",
+            latitude=req.latitude if req.latitude is not None else 28.7196,
+            longitude=req.longitude if req.longitude is not None else 77.1186,
+            phone=clean_phone,
+            whatsapp=req.whatsapp.strip() if req.whatsapp else clean_phone,
+            email=clean_email,
+            opening_time=req.opening_time or "09:00",
+            closing_time=req.closing_time or "21:30",
+            days_open="Mon-Sun",
+            is_verified=True,
+            status="active",
+        )
+        db.add(biz)
+        db.commit()
+        db.refresh(biz)
+    else:
+        # Update existing business profile
+        biz.name = req.business_name.strip()
+        biz.category = req.category.strip()
+        biz.address = req.full_address.strip()
+        biz.locality = req.locality.strip()
+        biz.city = req.city.strip()
+        biz.phone = clean_phone
+        biz.whatsapp = req.whatsapp.strip() if req.whatsapp else clean_phone
+        biz.email = clean_email
+        biz.opening_time = req.opening_time or biz.opening_time
+        biz.closing_time = req.closing_time or biz.closing_time
+        biz.is_verified = True
+        db.commit()
+        db.refresh(biz)
+
+    token = create_access_token(data={"sub": str(user.id), "email": user.email, "role": "merchant"})
+
+    profile = {
+        "id": str(biz.id),
+        "businessName": biz.name,
+        "category": biz.category,
+        "ownerName": user.full_name or "Store Owner",
+        "phone": biz.phone or "",
+        "whatsapp": biz.whatsapp or "",
+        "email": biz.email or "",
+        "fullAddress": biz.address,
+        "locality": biz.locality,
+        "city": biz.city,
+        "pincode": biz.pincode or "",
+        "docType": req.doc_type or "GSTIN",
+        "docNumber": req.doc_number or "",
+        "openingTime": biz.opening_time,
+        "closingTime": biz.closing_time,
+        "isVerified": True,
+        "registeredAt": datetime.datetime.utcnow().isoformat(),
+    }
+
+    return {
+        "status": "success",
+        "message": f"Storefront '{biz.name}' registered successfully.",
+        "token": token,
+        "business": {
+            "id": biz.id,
+            "slug": biz.slug,
+            "name": biz.name,
+            "category": biz.category,
+            "address": biz.address,
+            "locality": biz.locality,
+            "city": biz.city,
+            "phone": biz.phone,
+            "whatsapp": biz.whatsapp,
+            "email": biz.email,
+            "openingTime": biz.opening_time,
+            "closingTime": biz.closing_time,
+        },
+        "profile": profile,
+    }
+
+
+@router.post("/login", response_model=Dict[str, Any])
+def login_merchant(
+    req: MerchantLoginRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Authenticates a merchant via their phone or email and Store Security PIN against the database.
+    Allows verified merchants to log in from any computer or browser and instantly access their storefront dashboard.
+    """
+    clean_id = req.identifier.strip().lower()
+    clean_digits = "".join(filter(str.isdigit, clean_id))
+    clean_pin = req.store_pin.strip()
+
+    if not clean_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store phone number or email address is required.",
+        )
+
+    if not clean_pin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store Security PIN / Password is required.",
+        )
+
+    user = None
+    biz = None
+
+    if "@" in clean_id:
+        user = db.query(User).filter(func.lower(User.email) == clean_id).first()
+        if not user:
+            biz = db.query(Business).filter(func.lower(Business.email) == clean_id).first()
+            if biz and biz.owner_id:
+                user = db.query(User).filter(User.id == biz.owner_id).first()
+    else:
+        ten_digits = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+        if not ten_digits or len(ten_digits) < 10:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please enter a valid 10-digit phone number or email address.",
+            )
+
+        phone_variants = [
+            clean_id,
+            clean_digits,
+            ten_digits,
+            f"+91{ten_digits}",
+            f"0{ten_digits}",
+            f"+91-{ten_digits[:5]}-{ten_digits[5:]}",
+            f"+91 {ten_digits}",
+            f"+91 {ten_digits[:5]} {ten_digits[5:]}",
+        ]
+
+        # 1. Lookup in User table
+        user = db.query(User).filter(
+            or_(
+                User.phone.in_(phone_variants),
+                User.phone.endswith(ten_digits),
+            )
+        ).first()
+
+        if not user:
+            candidates = db.query(User).filter(
+                or_(
+                    User.phone.like(f"%{ten_digits[:5]}%"),
+                    User.phone.like(f"%{ten_digits[5:]}%"),
+                )
+            ).all()
+            for c in candidates:
+                if c.phone and "".join(filter(str.isdigit, c.phone)).endswith(ten_digits):
+                    user = c
+                    break
+
+        # 2. If not found in User, lookup in Business table
+        if not user:
+            biz = db.query(Business).filter(
+                or_(
+                    Business.phone.in_(phone_variants),
+                    Business.phone.endswith(ten_digits),
+                )
+            ).first()
+
+            if not biz:
+                biz_candidates = db.query(Business).filter(
+                    or_(
+                        Business.phone.like(f"%{ten_digits[:5]}%"),
+                        Business.phone.like(f"%{ten_digits[5:]}%"),
+                    )
+                ).all()
+                for b in biz_candidates:
+                    if b.phone and "".join(filter(str.isdigit, b.phone)).endswith(ten_digits):
+                        biz = b
+                        break
+
+            if biz and biz.owner_id:
+                user = db.query(User).filter(User.id == biz.owner_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No merchant storefront found matching this phone number or email.",
+        )
+
+    # RBAC: Check user role
+    if user.role not in ("merchant", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. This account does not have merchant storefront privileges.",
+        )
+
+    # Account status: active check
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your merchant account has been deactivated. Please contact support.",
+        )
+
+    # Account status: verification check
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your merchant account is pending verification. Please complete verification before logging in.",
+        )
+
+    # Verify PIN / Password
+    if not user.password_hash or not verify_password(clean_pin, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect Store Access PIN / Password. Please check and try again.",
+        )
+
+    # Resolve merchant business
+    if not biz:
+        biz = db.query(Business).filter(Business.owner_id == user.id).first()
+
+    if not biz:
+        # Check if there is an unlinked business matching user's phone or email
+        if user.email:
+            biz = db.query(Business).filter(func.lower(Business.email) == user.email.lower()).first()
+        if not biz and user.phone:
+            u_digits = "".join(filter(str.isdigit, user.phone))[-10:]
+            if len(u_digits) >= 10:
+                biz_candidates = db.query(Business).filter(Business.phone.isnot(None)).all()
+                for b in biz_candidates:
+                    if b.phone and "".join(filter(str.isdigit, b.phone)).endswith(u_digits):
+                        biz = b
+                        break
+        if biz and biz.owner_id is None:
+            biz.owner_id = user.id
+            db.commit()
+            db.refresh(biz)
+
+    if not biz:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No storefront found for this merchant account. Please complete store registration.",
+        )
+
+    if biz.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your storefront is currently inactive. Please contact support.",
+        )
+
+    token = create_access_token(data={"sub": str(user.id), "email": user.email, "role": user.role})
+
+    profile = {
+        "id": str(biz.id),
+        "businessName": biz.name,
+        "category": biz.category,
+        "ownerName": user.full_name or "Store Owner",
+        "phone": biz.phone or user.phone or "",
+        "whatsapp": biz.whatsapp or biz.phone or "",
+        "email": biz.email or user.email or "",
+        "fullAddress": biz.address or "",
+        "locality": biz.locality or "",
+        "city": biz.city or "",
+        "pincode": biz.pincode or "",
+        "docType": "GSTIN",
+        "docNumber": getattr(biz, "gstin", "") or getattr(biz, "tax_identifier", "") or "",
+        "openingTime": biz.opening_time or "09:00",
+        "closingTime": biz.closing_time or "21:30",
+        "isVerified": bool(biz.is_verified and user.is_verified),
+        "registeredAt": biz.created_at.isoformat() if biz.created_at else datetime.datetime.utcnow().isoformat(),
+    }
+
+    return {
+        "status": "success",
+        "message": f"Welcome back, {biz.name}!",
+        "token": token,
+        "business": {
+            "id": biz.id,
+            "slug": biz.slug,
+            "name": biz.name,
+            "category": biz.category,
+            "address": biz.address,
+            "locality": biz.locality,
+            "city": biz.city,
+            "phone": biz.phone,
+            "whatsapp": biz.whatsapp,
+            "email": biz.email,
+            "openingTime": biz.opening_time,
+            "closingTime": biz.closing_time,
+        },
+        "profile": profile,
+    }
+
+
+# ==============================================================================
+# Endpoints: 0.5 Merchant Media & Camera Uploads
+# ==============================================================================
+@router.post("/upload-image", response_model=Dict[str, Any])
+@router.post("/upload", response_model=Dict[str, Any])
+async def upload_merchant_media_file(
+    file: UploadFile = File(...),
+    biz: Business = Depends(get_current_merchant_business),
+):
+    """
+    Uploads an image (photo capture or file browse) for merchant products, offers, banners, or storefront logos.
+    Supports native camera capture and browser file picking.
+    Validates file format and size, generates WebP thumbnails, and persists to cloud storage (S3/R2/GCS) or static storage.
+    """
+    try:
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is empty.",
+            )
+
+        content_type = file.content_type or "image/jpeg"
+        result = await save_merchant_media(
+            file_bytes=file_bytes,
+            original_filename=file.filename or "photo.jpg",
+            content_type=content_type,
+            merchant_id=biz.id,
+        )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+    except Exception as e:
+        logger.exception(f"[merchant_upload] Failed to process media upload: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to store uploaded media file.",
+        )
+
+
 # ==============================================================================
 # Endpoints: 1. Storefront Profile
 # ==============================================================================
@@ -287,6 +750,10 @@ def get_storefront_profile(
     offer_count = db.query(func.count(Offer.id)).filter(Offer.business_id == biz.id).scalar() or 0
     orders_count = db.query(func.count(Order.id)).filter(Order.business_id == biz.id).scalar() or 0
     leads_count = db.query(func.count(CustomerEnquiry.id)).filter(CustomerEnquiry.business_id == biz.id).scalar() or 0
+
+    biz_settings = MERCHANT_SETTINGS_STORE.get(str(biz.id), {})
+    cover_img = biz_settings.get("cover_image") or "./assets/crops/biz-ai-cafe.webp"
+    logo_img = biz_settings.get("logo") or biz.image_url or "./assets/crops/biz-card-chai.webp"
 
     return {
         "status": "success",
@@ -316,8 +783,17 @@ def get_storefront_profile(
             "openingTime": biz.opening_time,
             "closingTime": biz.closing_time,
             "daysOpen": biz.days_open,
-            "logo": biz.image_url or "./assets/crops/biz-card-chai.webp",
-            "coverImage": "./assets/crops/biz-ai-cafe.webp",
+            "fssaiLicenseNumber": biz.fssai_license_number or "",
+            "fssai_license_number": biz.fssai_license_number or "",
+            "gstin": biz.gstin or "",
+            "settlementUpiId": biz.settlement_upi_id or "",
+            "settlement_upi_id": biz.settlement_upi_id or "",
+            "settlementBankAccount": biz.settlement_bank_account or "",
+            "settlement_bank_account": biz.settlement_bank_account or "",
+            "settlementBankIfsc": biz.settlement_bank_ifsc or "",
+            "settlement_bank_ifsc": biz.settlement_bank_ifsc or "",
+            "logo": logo_img,
+            "coverImage": cover_img,
             "stats": {
                 "activeProductsCount": prod_count,
                 "activeOffersCount": offer_count,
@@ -369,6 +845,27 @@ def update_storefront_profile(
         biz.closing_time = body.closing_time
     if body.days_open:
         biz.days_open = body.days_open
+    if body.fssai_license_number is not None:
+        biz.fssai_license_number = body.fssai_license_number.strip()
+    if body.gstin is not None:
+        biz.gstin = body.gstin.strip().upper()
+    if body.settlement_upi_id is not None:
+        biz.settlement_upi_id = body.settlement_upi_id.strip()
+    if body.settlement_bank_account is not None:
+        biz.settlement_bank_account = body.settlement_bank_account.strip()
+    if body.settlement_bank_ifsc is not None:
+        biz.settlement_bank_ifsc = body.settlement_bank_ifsc.strip().upper()
+
+    if str(biz.id) not in MERCHANT_SETTINGS_STORE:
+        MERCHANT_SETTINGS_STORE[str(biz.id)] = {}
+
+    if body.cover_image:
+        MERCHANT_SETTINGS_STORE[str(biz.id)]["cover_image"] = body.cover_image.strip()
+    if body.logo:
+        MERCHANT_SETTINGS_STORE[str(biz.id)]["logo"] = body.logo.strip()
+        biz.image_url = body.logo.strip()
+    elif body.image_url:
+        biz.image_url = body.image_url.strip()
 
     if body.owner_name and biz.owner:
         biz.owner.full_name = body.owner_name.strip()
@@ -472,6 +969,30 @@ def update_merchant_settings(
         },
     )
 
+    curr = copy.deepcopy(curr) if isinstance(curr, dict) else {}
+    if "notifications" not in curr or not isinstance(curr["notifications"], dict):
+        curr["notifications"] = {
+            "enquiries": True,
+            "reviews": True,
+            "promotions": True,
+            "billing": True,
+            "queries": True,
+            "updates": False,
+        }
+    if "preferences" not in curr or not isinstance(curr["preferences"], dict):
+        curr["preferences"] = {
+            "language": "English",
+            "timezone": "(GMT +5:30) India Standard Time",
+            "dateFormat": "DD MMM YYYY (e.g. 30 Apr 2026)",
+            "currency": "INR (₹)",
+            "measurement": "Metric (km, m, °C)",
+        }
+    if "integrations" not in curr or not isinstance(curr["integrations"], dict):
+        curr["integrations"] = {
+            "googleBusinessConnected": True,
+            "whatsAppConnected": bool(biz.phone),
+        }
+
     if body.notifications:
         curr["notifications"].update(body.notifications)
     if body.preferences:
@@ -498,9 +1019,10 @@ def change_merchant_password(
     body: PasswordChangeRequest,
     user: User = Depends(get_current_user),
     biz: Business = Depends(get_current_merchant_business),
+    db: Session = Depends(get_db),
 ):
     """
-    Changes or updates the merchant portal login PIN / password for the authenticated user.
+    Changes or updates the merchant portal login PIN / password for the authenticated user in the database.
     """
     if len(body.new_pin) < 4:
         raise HTTPException(
@@ -508,8 +1030,19 @@ def change_merchant_password(
             detail="PIN / Password must be at least 4 characters long.",
         )
 
+    if body.old_pin and user.password_hash:
+        if not verify_password(body.old_pin, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current PIN / Password does not match.",
+            )
+
+    user.password_hash = hash_password(body.new_pin)
+    db.commit()
+
     key = str(biz.id)
-    if key in MERCHANT_SETTINGS_STORE:
+    if key in MERCHANT_SETTINGS_STORE and isinstance(MERCHANT_SETTINGS_STORE[key], dict):
+        MERCHANT_SETTINGS_STORE[key].setdefault("security", {})
         MERCHANT_SETTINGS_STORE[key]["security"]["lastPasswordChange"] = "Just now"
 
     return {
@@ -708,7 +1241,7 @@ def create_merchant_product(
         description=body.description,
         availability_status=body.availability_status,
         stock_quantity=body.stock_quantity,
-        image_url=body.image_url,
+        image_url=body.image_url or body.image,
     )
     db.add(new_p)
     db.commit()
@@ -755,6 +1288,10 @@ def update_merchant_product(
         p.availability_status = "in_stock" if body["status"] == "Active" else "out_of_stock"
     if "stock" in body:
         p.stock_quantity = int(body["stock"])
+    if "image_url" in body:
+        p.image_url = body["image_url"]
+    elif "image" in body:
+        p.image_url = body["image"]
 
     p.updated_at = datetime.datetime.utcnow()
     db.commit()
@@ -1108,6 +1645,7 @@ def list_merchant_offers(
                 "validUntil": o.valid_until.strftime("%d %b %Y"),
                 "status": "Active" if o.is_active else "Expired",
                 "claimedCount": 0,
+                "image": o.banner_image_url or "./assets/crops/biz-urban-chai.webp",
             }
             for o in offers
         ],
@@ -1130,6 +1668,8 @@ def create_merchant_offer(
         except Exception:
             pass
 
+    banner_img = body.banner_image_url or body.image_url or body.image
+
     new_o = Offer(
         business_id=biz.id,
         title=body.title.strip(),
@@ -1141,6 +1681,7 @@ def create_merchant_offer(
         valid_until=valid_until_dt,
         terms_conditions="Valid for local residents. Cannot be combined with other offers.",
         is_active=True,
+        banner_image_url=banner_img,
     )
     db.add(new_o)
     db.commit()
@@ -1293,3 +1834,134 @@ def delete_merchant_event(
     db.delete(e)
     db.commit()
     return {"status": "success", "message": "Event deleted successfully."}
+
+
+# ==============================================================================
+# Web Push Notifications (Service Worker Background Order Chime)
+# ==============================================================================
+
+class PushSubscriptionPayload(BaseModel):
+    business_id: str
+    endpoint: str
+    p256dh: Optional[str] = None
+    auth: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+@router.get("/push-subscription/public-key", response_model=Dict[str, Any])
+def get_push_public_key():
+    """
+    Returns the VAPID public key so client browsers and PWAs can subscribe
+    to Web Push notifications via Service Worker (pushManager.subscribe).
+    """
+    return {
+        "status": "success",
+        "public_key": get_vapid_public_key(),
+    }
+
+
+@router.post("/push-subscription", response_model=Dict[str, Any])
+def save_push_subscription(
+    req: PushSubscriptionPayload,
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_optional if "get_current_user_optional" in globals() else lambda: None),
+):
+    """
+    Registers or updates a Web Push subscription endpoint for the merchant storefront.
+    Allows lock-screen ringing and audio notification via Service Worker when the phone is sleeping.
+    """
+    if not req.endpoint or not req.business_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="business_id and endpoint are required.",
+        )
+
+    clean_biz = str(req.business_id).strip()
+    clean_endpoint = req.endpoint.strip()
+
+    sub = (
+        db.query(MerchantPushSubscription)
+        .filter(
+            MerchantPushSubscription.business_id == clean_biz,
+            MerchantPushSubscription.endpoint == clean_endpoint,
+        )
+        .first()
+    )
+
+    if sub:
+        sub.p256dh = req.p256dh
+        sub.auth = req.auth
+        sub.user_agent = req.user_agent
+        sub.updated_at = datetime.datetime.utcnow()
+    else:
+        sub = MerchantPushSubscription(
+            business_id=clean_biz,
+            user_id=getattr(user, "id", None) if user else None,
+            endpoint=clean_endpoint,
+            p256dh=req.p256dh,
+            auth=req.auth,
+            user_agent=req.user_agent,
+            created_at=datetime.datetime.utcnow(),
+            updated_at=datetime.datetime.utcnow(),
+        )
+        db.add(sub)
+
+    db.commit()
+    logger.info(f"[webpush] Registered push subscription for business {clean_biz}: {clean_endpoint[:45]}...")
+
+    return {
+        "status": "success",
+        "message": "Push subscription registered successfully.",
+        "subscription_id": sub.id,
+    }
+
+
+@router.delete("/push-subscription", response_model=Dict[str, Any])
+def delete_push_subscription(
+    endpoint: str = Query(...),
+    business_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Removes a Web Push subscription endpoint."""
+    q = db.query(MerchantPushSubscription).filter(MerchantPushSubscription.endpoint == endpoint.strip())
+    if business_id:
+        q = q.filter(MerchantPushSubscription.business_id == business_id.strip())
+    deleted_count = q.delete(synchronize_session=False)
+    db.commit()
+
+    return {
+        "status": "success",
+        "deleted_count": deleted_count,
+        "message": "Push subscription removed successfully.",
+    }
+
+
+@router.post("/test-push", response_model=Dict[str, Any])
+async def trigger_test_push(
+    business_id: str = Query("biz-registered-store"),
+    db: Session = Depends(get_db),
+):
+    """
+    Dispatches a test order audio chime notification to all registered Web Push devices
+    belonging to the merchant storefront.
+    """
+    clean_biz = business_id.strip()
+    test_payload = {
+        "type": "MERCHANT_ORDER",
+        "title": "🛍️ Test Order Alert — MyArea24",
+        "body": "Sample order received: ₹350.00 from Priya S. • Audio chime & lock screen ring verified!",
+        "orderNumber": f"TEST-ORD-{int(time.time()) % 10000}",
+        "businessId": clean_biz,
+        "finalPayable": 350.0,
+        "customerName": "Priya S.",
+        "deliveryAddress": "Flat 402, Green Valley Apartments",
+        "url": "/merchant",
+    }
+
+    count = await send_merchant_push_notification(clean_biz, test_payload, db)
+    return {
+        "status": "success",
+        "dispatched_count": count,
+        "message": f"Test push notification dispatched to {count} registered device(s).",
+    }
+

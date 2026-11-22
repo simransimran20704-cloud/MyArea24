@@ -1,5 +1,5 @@
 import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from backend.app.core.config import settings
 from backend.app.core.errors import ProviderAuthError, ProviderError
 from backend.app.core.logging import logger

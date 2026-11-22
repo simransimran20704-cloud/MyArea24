@@ -7,3 +7,4 @@ def configure_test_environment(monkeypatch):
     monkeypatch.setattr(settings, "OTP_DEV_MODE", True)
     monkeypatch.setattr(settings, "APP_ENV", "testing")
     monkeypatch.setattr(settings, "DEBUG", True)
+    monkeypatch.setattr(settings, "INGESTION_ENABLED", False)

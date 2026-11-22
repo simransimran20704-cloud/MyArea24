@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
+import os
 import sys
 
-if sys.platform == "win32":
+if sys.platform == "win32" and "pytest" not in sys.modules and not any("pytest" in a for a in sys.argv):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
@@ -12,11 +13,13 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.core.config import settings
 from backend.app.core.errors import MyArea24Error
 from backend.app.core.logging import logger
 from backend.app.database.session import Base, engine
+from backend.app.services.media_storage import ensure_upload_directories, STATIC_DIR
 from backend.app.api.health import router as health_router
 from backend.app.api.intelligence import router as intelligence_router
 from backend.app.api.auth import router as auth_router
@@ -27,11 +30,18 @@ from backend.app.api.offers import router as offers_router
 from backend.app.api.events import router as events_router
 from backend.app.api.saved import router as saved_router
 from backend.app.api.market import router as market_router
+from backend.app.api.fuel import router as fuel_router
 from backend.app.api.locations import router as locations_router, locations_plural_router
-from backend.app.api.emergency import router as emergency_router
+from backend.app.api.emergency import router as emergency_router, hospitals_router
 from backend.app.api.orders import router as orders_router
 from backend.app.api.merchant import router as merchant_router
 from backend.app.api.websockets import router as websockets_router
+from backend.app.api.rentals import router as rentals_router
+from backend.app.api.consent import router as consent_router
+from backend.app.api.system import router as system_router
+from backend.app.api.analytics import router as analytics_router
+from backend.app.api.maps import maps_router
+from backend.app.api.saved_routes import saved_routes_router
 from backend.app.ingestion.scheduler import scheduler
 
 
@@ -49,19 +59,46 @@ async def lifespan(app: FastAPI):
                 f"CRITICAL SECURITY CONFIGURATION ERROR: Default JWT_SECRET_KEY cannot be used in {settings.APP_ENV} mode!"
             )
 
-    # Initialize PostGIS spatial extensions if running against PostgreSQL
+    # Initialize PostGIS spatial extensions & pg_trgm fuzzy matching if running against PostgreSQL
     from backend.app.database.session import is_sqlite
     if not is_sqlite:
         from sqlalchemy import text
         try:
             with engine.connect() as conn:
                 conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
                 conn.commit()
-                logger.info("[main] PostGIS spatial extension verified on PostgreSQL.")
+                logger.info("[main] PostGIS and pg_trgm extensions verified on PostgreSQL.")
         except Exception as e:
-            logger.warning(f"[main] PostGIS extension notice (non-fatal): {e}")
+            logger.warning(f"[main] PostgreSQL extension notice (non-fatal): {e}")
 
     Base.metadata.create_all(bind=engine)
+
+    # PostGIS GiST spatial and pg_trgm GIN indexes on PostgreSQL for sub-millisecond queries
+    if not is_sqlite:
+        from sqlalchemy import text
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS ix_businesses_gist_spatial
+                    ON businesses USING GIST (
+                        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_emergency_facilities_gist_spatial
+                    ON emergency_facilities USING GIST (
+                        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_businesses_name_trgm
+                    ON businesses USING GIN (name gin_trgm_ops);
+                    CREATE INDEX IF NOT EXISTS ix_products_name_trgm
+                    ON products USING GIN (name gin_trgm_ops);
+                    CREATE INDEX IF NOT EXISTS ix_products_brand_trgm
+                    ON products USING GIN (brand gin_trgm_ops);
+                """))
+                conn.commit()
+                logger.info("[main] PostGIS GiST and pg_trgm GIN indexes verified.")
+        except Exception as e:
+            logger.warning(f"[main] PostgreSQL GIST/GIN index creation notice (non-fatal): {e}")
 
     # Schema evolution: ensure newly added columns are present in existing SQLite databases
     from sqlalchemy import inspect, text
@@ -114,11 +151,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.debug(f"[main] Index creation notice: {e}")
 
-    # Start background ingestion worker scheduler if enabled
-    if settings.INGESTION_ENABLED:
+    # Start background ingestion worker scheduler if enabled and not running in test suite
+    if settings.INGESTION_ENABLED and (settings.APP_ENV or "").lower() not in ("testing", "test"):
         scheduler.start()
     else:
-        logger.info("[main] INGESTION_ENABLED=false. Background polling is inactive.")
+        logger.info("[main] INGESTION_ENABLED=false or running in test environment. Background polling is inactive.")
 
     yield
 
@@ -202,11 +239,27 @@ app.include_router(offers_router)
 app.include_router(events_router)
 app.include_router(saved_router)
 app.include_router(market_router)
+app.include_router(fuel_router)
 app.include_router(locations_router)
 app.include_router(locations_plural_router)
 app.include_router(emergency_router)
+app.include_router(hospitals_router)
 app.include_router(merchant_router)
+app.include_router(rentals_router)
 app.include_router(websockets_router)
+app.include_router(consent_router)
+app.include_router(system_router)
+app.include_router(analytics_router)
+app.include_router(maps_router)
+app.include_router(saved_routes_router)
+
+# Mount Static Files (Merchant Media, Photos & Store Assets)
+try:
+    ensure_upload_directories()
+    if os.path.isdir(STATIC_DIR):
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+except Exception as e:
+    logger.warning(f"[main] Static files mount notice: {e}")
 
 
 if __name__ == "__main__":

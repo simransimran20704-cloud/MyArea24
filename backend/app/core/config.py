@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,9 +27,24 @@ class PilotLocation(BaseModel):
         return v
 
 
+_curr_file = Path(__file__).resolve()
+_frontend_dir = _curr_file.parent.parent.parent
+_repo_dir = _frontend_dir.parent
+_dotenv_path = os.getenv("DOTENV_FILE")
+if not _dotenv_path:
+    if (_frontend_dir / ".env").exists():
+        _dotenv_path = str(_frontend_dir / ".env")
+    elif (_repo_dir / ".env").exists():
+        _dotenv_path = str(_repo_dir / ".env")
+    else:
+        _dotenv_path = ".env"
+
+_default_env_file = _dotenv_path
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_default_env_file,
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -54,7 +71,12 @@ class Settings(BaseSettings):
             "https://aidivi265.github.io",
         ]
     )
-    ALLOWED_ORIGIN_REGEX: Optional[str] = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://aidivi265\.github\.io$"
+    ALLOWED_ORIGIN_REGEX: Optional[str] = (
+        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|"
+        r"^https://[a-zA-Z0-9_.-]+\.vercel\.app$|"
+        r"^https://([a-zA-Z0-9_-]+\.)*myarea24\.in$|"
+        r"^https://aidivi265\.github\.io$"
+    )
 
     # Database
     DATABASE_URL: str = "sqlite:///./myarea24.db"
@@ -62,6 +84,17 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 25
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+    DB_POOL_CLASS: Optional[str] = None  # Set to 'NullPool' for serverless Supabase if desired
+
+    # Supabase Cloud Integration
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_ANON_KEY: Optional[str] = None
+    SUPABASE_SERVICE_ROLE_KEY: Optional[str] = None
+    SUPABASE_STORAGE_BUCKET: str = "merchant-media"
+    SUPABASE_DOCUMENTS_BUCKET: str = "merchant-documents"
+
+    # Redis Spatial & Cache Configuration
+    REDIS_URL: Optional[str] = None
 
     # Authentication & JWT Configuration
     JWT_SECRET_KEY: str = "myarea24_local_development_secret_key_2026"
@@ -76,20 +109,44 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: Optional[str] = None
     SMTP_FROM: str = "no-reply@myarea24.in"
     SMTP_TLS: bool = True
-    OTP_DEV_MODE: bool = True
+    OTP_DEV_MODE: bool = False
 
     # Resend Transactional Email API (Alternative to SMTP)
     RESEND_API_KEY: Optional[str] = None
+    RESEND_FROM: str = "MyArea24 <onboarding@resend.dev>"
+    RESEND_REPLY_TO: str = "myarea24.info@gmail.com"
 
     # Razorpay Gateway & Webhook Signature Verification
     RAZORPAY_KEY_ID: Optional[str] = None
     RAZORPAY_KEY_SECRET: Optional[str] = None
+    RAZORPAY_WEBHOOK_SECRET: Optional[str] = None
 
-    # SMS Gateway Configuration (Fast2SMS / Twilio)
+    # Indian SMS Gateway Configuration & TRAI DLT Registration
+    # In India, commercial/transactional SMS requires TRAI DLT registration:
+    # 1. Principal Entity ID (PE ID) from telecom portal (Jio, Vilpower, Airtel)
+    # 2. 6-Character Sender ID Header (e.g., 'MYAR24')
+    # 3. Content Template ID registered and approved on DLT portal
+    SMS_PROVIDER: str = "fast2sms"  # 'fast2sms', 'msg91', 'textlocal', 'twilio', 'auto'
+    SMS_SENDER_ID: str = "MYAR24"  # 6-character TRAI DLT approved Header
+    DLT_ENTITY_ID: Optional[str] = None  # 19-digit Principal Entity ID
+    DLT_TEMPLATE_ID: Optional[str] = None  # 19-digit Content Template ID
     FAST2SMS_API_KEY: Optional[str] = None
+    FAST2SMS_ROUTE: str = "otp"  # 'otp' (quick route) or 'dlt' (TRAI compliant)
+    FAST2SMS_OTP_ID: Optional[str] = None  # Smart OTP Template ID from Fast2SMS panel (for /dev/otp/send)
+    MSG91_AUTH_KEY: Optional[str] = None
+    MSG91_TEMPLATE_ID: Optional[str] = None
+    MSG91_SENDER_ID: Optional[str] = "MYAR24"
+    TEXTLOCAL_API_KEY: Optional[str] = None
+    TEXTLOCAL_SENDER: Optional[str] = "MYAR24"
     TWILIO_ACCOUNT_SID: Optional[str] = None
     TWILIO_AUTH_TOKEN: Optional[str] = None
     TWILIO_FROM_PHONE: Optional[str] = None
+    SMS_STRICT_PRODUCTION: bool = False  # If True, fails hard with 503 if SMS dispatch fails in prod
+
+    # Web Push Notifications (VAPID / Service Worker background order alerts)
+    VAPID_PUBLIC_KEY: Optional[str] = None
+    VAPID_PRIVATE_KEY: Optional[str] = None
+    VAPID_CLAIMS_SUB: str = "mailto:support@myarea24.in"
 
     # Google Gemini AI Assistant Configuration
     GEMINI_API_KEY: Optional[str] = None
@@ -108,7 +165,10 @@ class Settings(BaseSettings):
     OPENWEATHERMAP_API_KEY: Optional[str] = None
     WEATHER_POLL_INTERVAL_MINUTES: int = 30
 
-    # Fuel Price Telemetry (API Mitra)
+    # Fuel Price Telemetry (India Petroleum API & PPAC/OMC)
+    INDIA_PETROLEUM_API_BASE_URL: str = "https://india-petroleum-api.vercel.app"
+    FUEL_POLL_INTERVAL_MINUTES: int = 60
+    FUEL_CACHE_TTL_SECONDS: int = 1800
     API_MITRA_API_KEY: Optional[str] = None
 
     # Traffic Provider Configuration (TomTom Primary, HERE Optional Fallback)
@@ -130,6 +190,42 @@ class Settings(BaseSettings):
     OPENAQ_API_KEY: Optional[str] = None
     OPENAQ_BASE_URL: str = "https://api.openaq.org/v3"
     DATA_GOV_IN_API_KEY: Optional[str] = None
+    DATA_GOV_IN_MANDI_RESOURCE_ID: str = "9ef84268-d588-465a-a308-a864a43d0070"
+    DATA_GOV_IN_HOSPITAL_RESOURCE_ID: str = "98fa254e-c5f8-4910-a19b-4828939b477d"
+    DATA_GOV_IN_HOSPITAL_BASE_URL: str = "https://api.data.gov.in/resource/98fa254e-c5f8-4910-a19b-4828939b477d"
+
+    # Geoapify Places Platform Configuration
+    GEOAPIFY_API_KEY: Optional[str] = None
+    GEOAPIFY_BASE_URL: str = "https://api.geoapify.com/v2"
+
+    # SSR Innovation Lab Petrol Pumps API Configuration
+    SSR_PETROL_PUMP_API_KEY: Optional[str] = None
+    SSR_PETROL_PUMP_BASE_URL: str = "https://api.ssrinnovationlab.com/api/petrol-pumps/pumps/"
+
+    # Residential Benchmark Provider (Global Property Metrics - GPM)
+    GPM_API_KEY: Optional[str] = None
+    GPM_API_BASE_URL: str = "https://globalpropertymetrics.com/api"
+
+    # India Product & Live Price Telemetry (RetailWeb / RWK API)
+    RWK_API_KEY: Optional[str] = None
+    RETAIL_PRICE_API_BASE_URL: str = "https://api.retailprice.in/v1"
+    RETAIL_PRICE_CACHE_TTL_SECONDS: int = 300
+
+    # Real-Time Event Discovery Configuration
+    TATHAASTU_API_KEY: Optional[str] = None
+    TATHAASTU_BASE_URL: str = "https://api.tathaastuapi.com/v1"
+    BUSHDRUM_MCP_URL: str = "https://bushdrum.com/mcp"
+    FILMNAGAR_API_URL: str = "https://filmnagar.org/api/v1"
+    ALLEVENTS_API_KEY: Optional[str] = None
+    STARTUP_GRANTS_INDIA_API_KEY: Optional[str] = None
+    BRABBLE_API_KEY: Optional[str] = None
+    BRABBLE_API_URL: str = "https://brabble.ai/api/listings"
+    EVENTBRITE_API_KEY: Optional[str] = None
+    EVENTBRITE_CLIENT_SECRET: Optional[str] = None
+    EVENTBRITE_PRIVATE_TOKEN: Optional[str] = None
+    EVENTBRITE_PUBLIC_TOKEN: Optional[str] = None
+    EVENTBRITE_API_BASE_URL: str = "https://www.eventbriteapi.com/v3"
+    EVENTBRITE_OAUTH_TOKEN_URL: str = "https://www.eventbrite.com/oauth/token"
     AQI_POLL_INTERVAL_MINUTES: int = 60
     AQI_MAX_STATION_DISTANCE_KM: float = 15.0
     AQI_OBSERVATION_MAX_AGE_MINUTES: int = 180

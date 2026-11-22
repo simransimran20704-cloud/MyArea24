@@ -17,6 +17,8 @@ from backend.app.core.logging import logger
 from backend.app.core.websocket_manager import ws_manager
 from backend.app.database.models import Order, OrderItem, Product, ServiceBooking, User, Business
 from backend.app.database.session import get_db
+from backend.app.services.indian_spatial_service import haversine_km, get_coordinates_for_pincode
+from backend.app.services.web_push_service import send_merchant_push_notification
 
 router = APIRouter(prefix="/api/v1", tags=["E-Commerce Orders & Service Bookings"])
 
@@ -29,7 +31,7 @@ class OrderItemPayload(BaseModel):
     product_name: str
     unit_price: float
     quantity: int = 1
-    store_name: Optional[str] = "Apna Super Mart"
+    store_name: Optional[str] = None
     image_url: Optional[str] = None
 
 
@@ -41,6 +43,7 @@ class OrderCreateRequest(BaseModel):
     platform_fee: float = 5.0
     discount_amount: float = 0.0
     payment_method: str = "upi_qr"  # 'upi_qr', 'razorpay', 'phonepe', 'cod'
+    fulfillment_type: str = "DELIVERY"  # 'DELIVERY' or 'PICKUP'
     customer_name: str
     customer_phone: str
     delivery_address: str
@@ -48,6 +51,7 @@ class OrderCreateRequest(BaseModel):
     delivery_pincode: Optional[str] = None
     delivery_lat: Optional[float] = None
     delivery_lng: Optional[float] = None
+    merchant_phone: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -91,12 +95,12 @@ class ServiceBookingStatusUpdateRequest(BaseModel):
 # Helper Functions
 # ---------------------------------------------------------
 def generate_order_number() -> str:
-    digits = "".join(random.choices(string.digits, k=4))
+    digits = "".join(random.choices(string.digits, k=6))
     return f"MA24-ORD-{digits}"
 
 
 def generate_booking_number() -> str:
-    digits = "".join(random.choices(string.digits, k=4))
+    digits = "".join(random.choices(string.digits, k=6))
     return f"MA24-SRV-{digits}"
 
 
@@ -107,6 +111,94 @@ def generate_service_otp() -> str:
 # ---------------------------------------------------------
 # Order Endpoints
 # ---------------------------------------------------------
+
+@router.get("/orders/delivery-quote")
+def get_delivery_quote(
+    customer_lat: Optional[float] = Query(None, description="Customer delivery latitude"),
+    customer_lng: Optional[float] = Query(None, description="Customer delivery longitude"),
+    customer_pincode: Optional[str] = Query(None, description="Customer delivery postal PIN code"),
+    business_id: Optional[int] = Query(None, description="Store or merchant ID"),
+    business_name: Optional[str] = Query(None, description="Store or merchant name"),
+    subtotal: float = Query(0.0, description="Cart items subtotal in INR"),
+    fulfillment_type: str = Query("DELIVERY", description="Fulfillment mode: DELIVERY or PICKUP"),
+    db: Session = Depends(get_db),
+):
+    """
+    Authoritative server-side distance-tiered delivery fee computation based on exact GPS coordinates.
+    - Base fee: ₹20 for first 2.0 km.
+    - Tier fee: ₹10/km for each additional kilometer.
+    - Free Delivery threshold: orders >= ₹499.
+    """
+    # 1. Resolve customer coordinates from GPS or PIN code
+    c_lat = customer_lat
+    c_lng = customer_lng
+    if (c_lat is None or c_lng is None) and customer_pincode:
+        p_coords = get_coordinates_for_pincode(customer_pincode)
+        if p_coords:
+            c_lat, c_lng = p_coords
+
+    if c_lat is None or c_lng is None:
+        # Default district centroid if unprovided
+        c_lat, c_lng = 28.6304, 77.2177
+
+    # 2. Resolve merchant coordinates
+    merchant_lat = None
+    merchant_lon = None
+    store_name = business_name or "Neighborhood Store"
+    biz = None
+
+    if business_id:
+        biz = db.query(Business).filter(Business.id == business_id).first()
+    if not biz and business_name:
+        biz = db.query(Business).filter(Business.name.ilike(f"%{business_name.strip()}%")).first()
+
+    if biz:
+        store_name = biz.name
+        if biz.latitude is not None and biz.longitude is not None:
+            merchant_lat = float(biz.latitude)
+            merchant_lon = float(biz.longitude)
+        elif biz.pincode:
+            b_coords = get_coordinates_for_pincode(biz.pincode)
+            if b_coords:
+                merchant_lat, merchant_lon = b_coords
+
+    if merchant_lat is None or merchant_lon is None:
+        merchant_lat, merchant_lon = 28.6304, 77.2177
+
+    dist_km = round(haversine_km(merchant_lat, merchant_lon, c_lat, c_lng), 2)
+
+    is_pickup = (fulfillment_type or "").strip().upper() == "PICKUP"
+    is_free = is_pickup or subtotal >= 499.0
+    if is_pickup:
+        fee = 0.0
+        tier_exp = "FREE Store Pickup / Takeaway (Ready in ~15 mins)"
+    elif is_free:
+        fee = 0.0
+        tier_exp = "FREE Delivery (Cart >= ₹499)"
+    elif dist_km <= 2.0:
+        fee = 20.0
+        tier_exp = f"₹20 for first 2 km, +₹10/km thereafter ({dist_km} km)"
+    else:
+        fee = round(20.0 + (dist_km - 2.0) * 10.0, 2)
+        tier_exp = f"₹20 for first 2 km, +₹10/km thereafter ({dist_km} km)"
+
+    return {
+        "store_name": store_name,
+        "business_id": biz.id if biz else business_id,
+        "merchant_coords": {"lat": merchant_lat, "lng": merchant_lon},
+        "customer_coords": {"lat": c_lat, "lng": c_lng},
+        "distance_km": dist_km,
+        "base_km": 2.0 if not is_pickup else 0.0,
+        "base_fee": 20.0 if not is_pickup else 0.0,
+        "per_km_rate": 10.0 if not is_pickup else 0.0,
+        "subtotal": round(subtotal, 2),
+        "delivery_fee": fee,
+        "is_free": is_free,
+        "free_threshold": 499.0 if not is_pickup else 0.0,
+        "fulfillment_type": "PICKUP" if is_pickup else "DELIVERY",
+        "tier_explanation": tier_exp,
+    }
+
 @router.post("/orders", status_code=status.HTTP_201_CREATED)
 async def create_order(
     req: OrderCreateRequest,
@@ -117,7 +209,83 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Order must contain at least one item.")
 
     items_subtotal = sum(item.unit_price * item.quantity for item in req.items)
-    final_payable = max(0.0, items_subtotal + req.delivery_fee + req.platform_fee - req.discount_amount)
+
+    # 1. Resolve customer delivery coordinates (GPS or PIN code)
+    c_lat = req.delivery_lat
+    c_lng = req.delivery_lng
+    if (c_lat is None or c_lng is None) and req.delivery_pincode:
+        c_coords = get_coordinates_for_pincode(req.delivery_pincode)
+        if c_coords:
+            c_lat, c_lng = c_coords
+    if c_lat is None or c_lng is None:
+        c_lat, c_lng = 28.6304, 77.2177
+
+    # 2. Resolve merchant coordinates and authoritative store identity
+    merchant_lat = None
+    merchant_lon = None
+    biz = None
+    effective_business_name = req.business_name
+    if not effective_business_name and req.items:
+        first_store = next((it.store_name for it in req.items if it.store_name), None)
+        if first_store:
+            effective_business_name = first_store
+
+    if req.business_id:
+        biz = db.query(Business).filter(Business.id == req.business_id).first()
+        if biz and biz.latitude is not None and biz.longitude is not None:
+            merchant_lat = float(biz.latitude)
+            merchant_lon = float(biz.longitude)
+        elif biz and biz.pincode:
+            b_coords = get_coordinates_for_pincode(biz.pincode)
+            if b_coords:
+                merchant_lat, merchant_lon = b_coords
+
+    if merchant_lat is None and effective_business_name:
+        biz = db.query(Business).filter(Business.name.ilike(f"%{effective_business_name.strip()}%")).first()
+        if biz and biz.latitude is not None and biz.longitude is not None:
+            merchant_lat = float(biz.latitude)
+            merchant_lon = float(biz.longitude)
+        elif biz and biz.pincode:
+            b_coords = get_coordinates_for_pincode(biz.pincode)
+            if b_coords:
+                merchant_lat, merchant_lon = b_coords
+
+    if merchant_lat is None and req.items:
+        first_pid = next((it.product_id for it in req.items if it.product_id), None)
+        if first_pid:
+            prod = db.query(Product).filter(Product.id == first_pid).first()
+            if prod and prod.business_id:
+                biz = db.query(Business).filter(Business.id == prod.business_id).first()
+                if biz and biz.latitude is not None and biz.longitude is not None:
+                    merchant_lat = float(biz.latitude)
+                    merchant_lon = float(biz.longitude)
+                elif biz and biz.pincode:
+                    b_coords = get_coordinates_for_pincode(biz.pincode)
+                    if b_coords:
+                        merchant_lat, merchant_lon = b_coords
+
+    if biz:
+        effective_business_name = biz.name
+    elif not effective_business_name:
+        effective_business_name = "Neighborhood Store"
+
+    if merchant_lat is None or merchant_lon is None:
+        merchant_lat, merchant_lon = 28.6304, 77.2177
+
+    # 3. Authoritative Server-Side Delivery Fee Calculation (enforces distance tiers, overrides client-tampered fees)
+    fulfillment = (req.fulfillment_type or "DELIVERY").strip().upper()
+    if fulfillment == "PICKUP":
+        enforced_delivery_fee = 0.0
+    else:
+        dist_km = round(haversine_km(merchant_lat, merchant_lon, c_lat, c_lng), 2)
+        if items_subtotal >= 499.0:
+            enforced_delivery_fee = 0.0
+        elif dist_km <= 2.0:
+            enforced_delivery_fee = 20.0
+        else:
+            enforced_delivery_fee = round(20.0 + (dist_km - 2.0) * 10.0, 2)
+
+    final_payable = max(0.0, round(items_subtotal + enforced_delivery_fee + req.platform_fee - req.discount_amount, 2))
     order_num = generate_order_number()
 
     # Determine initial payment status
@@ -129,16 +297,18 @@ async def create_order(
     order = Order(
         order_number=order_num,
         user_id=current_user.id if current_user else None,
-        business_id=req.business_id,
-        business_name=req.business_name,
+        business_id=biz.id if biz else req.business_id,
+        business_name=effective_business_name,
         status="placed",
         total_amount=round(items_subtotal, 2),
-        delivery_fee=round(req.delivery_fee, 2),
+        delivery_fee=round(enforced_delivery_fee, 2),
         platform_fee=round(req.platform_fee, 2),
         discount_amount=round(req.discount_amount, 2),
         final_payable=round(final_payable, 2),
         payment_method=req.payment_method,
         payment_status=payment_status,
+        fulfillment_type=fulfillment,
+        estimated_delivery_mins=15 if fulfillment == "PICKUP" else 25,
         tracking_token=guest_tracking_token,
         customer_name=req.customer_name,
         customer_phone=req.customer_phone,
@@ -147,7 +317,6 @@ async def create_order(
         delivery_pincode=req.delivery_pincode,
         delivery_lat=req.delivery_lat,
         delivery_lng=req.delivery_lng,
-        estimated_delivery_mins=20,
         notes=req.notes,
     )
     db.add(order)
@@ -178,7 +347,7 @@ async def create_order(
             unit_price=item.unit_price,
             quantity=item.quantity,
             total_price=round(item.unit_price * item.quantity, 2),
-            store_name=item.store_name,
+            store_name=item.store_name or effective_business_name,
             image_url=item.image_url,
         )
         db.add(oi)
@@ -187,10 +356,17 @@ async def create_order(
     db.commit()
     db.refresh(order)
 
-    # UPI Dynamic Pay URI
+    # UPI Dynamic Pay URIs for standard browsers and application-specific deep links (GPay, PhonePe, Paytm, BHIM)
     upi_intent_uri = (
         f"upi://pay?pa=myarea24@upi&pn=MyArea24%20Commerce&am={order.final_payable:.2f}&cu=INR&tr={order.order_number}"
     )
+    upi_app_uris = {
+        "gpay": f"tez://upi/pay?pa=myarea24@upi&pn=MyArea24%20Commerce&am={order.final_payable:.2f}&cu=INR&tr={order.order_number}",
+        "phonepe": f"phonepe://pay?pa=myarea24@upi&pn=MyArea24%20Commerce&am={order.final_payable:.2f}&cu=INR&tr={order.order_number}",
+        "paytm": f"paytmmp://pay?pa=myarea24@upi&pn=MyArea24%20Commerce&am={order.final_payable:.2f}&cu=INR&tr={order.order_number}",
+        "bhim": f"bhim://pay?pa=myarea24@upi&pn=MyArea24%20Commerce&am={order.final_payable:.2f}&cu=INR&tr={order.order_number}",
+        "generic": upi_intent_uri,
+    }
 
     order_items_summary = [
         {
@@ -220,11 +396,14 @@ async def create_order(
             "final_payable": order.final_payable,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
+            "fulfillment_type": getattr(order, "fulfillment_type", "DELIVERY") or "DELIVERY",
             "customer_name": order.customer_name,
             "customer_phone": order.customer_phone,
             "delivery_address": order.delivery_address,
             "estimated_delivery_mins": order.estimated_delivery_mins,
             "created_at": order.created_at.isoformat(),
+            "business_name": order.business_name,
+            "merchant_phone": biz.phone if (biz and biz.phone) else req.merchant_phone,
             "items": order_items_summary,
         }
         await ws_manager.send_merchant_event(biz_id, "MERCHANT_ORDER", order_ws_data)
@@ -234,6 +413,23 @@ async def create_order(
             "payment_status": order.payment_status,
             "updated_at": order.created_at.isoformat(),
         })
+
+        # Background Web Push notification to merchant devices (including sleeping / locked screen phones)
+        try:
+            push_payload = {
+                "type": "MERCHANT_ORDER",
+                "title": f"🛍️ New Order: ₹{order.final_payable:.0f}",
+                "body": f"#{order.order_number} from {order.customer_name or 'Neighbor'} • {order_items_summary[0]['product_name'] if order_items_summary else 'Cart Items'}",
+                "orderNumber": order.order_number,
+                "businessId": biz_id,
+                "finalPayable": float(order.final_payable),
+                "customerName": order.customer_name,
+                "deliveryAddress": order.delivery_address,
+                "url": "/merchant",
+            }
+            await send_merchant_push_notification(biz_id, push_payload, db)
+        except Exception as push_err:
+            logger.warning(f"[webpush] Failed to dispatch merchant push: {push_err}")
     except Exception as e:
         logger.warning(f"[ws] Could not broadcast new order over websockets: {e}")
 
@@ -251,18 +447,22 @@ async def create_order(
             "final_payable": order.final_payable,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
+            "fulfillment_type": getattr(order, "fulfillment_type", "DELIVERY") or "DELIVERY",
             "tracking_token": order.tracking_token,
             "customer_name": order.customer_name,
             "customer_phone": order.customer_phone,
             "delivery_address": order.delivery_address,
             "estimated_delivery_mins": order.estimated_delivery_mins,
             "created_at": order.created_at.isoformat(),
+            "business_name": order.business_name,
+            "merchant_phone": biz.phone if (biz and biz.phone) else req.merchant_phone,
             "items": order_items_summary,
         },
         "payment": {
             "method": order.payment_method,
             "payable_amount": order.final_payable,
             "upi_intent_uri": upi_intent_uri,
+            "upi_app_uris": upi_app_uris,
             "upi_id": "myarea24@upi",
             "razorpay_order_id": f"rzp_order_{order.order_number.replace('-', '_')}",
             "phonepe_txn_id": f"pp_txn_{order.order_number.replace('-', '_')}",
@@ -432,6 +632,7 @@ def get_order_details(
             "final_payable": order.final_payable,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
+            "fulfillment_type": getattr(order, "fulfillment_type", "DELIVERY") or "DELIVERY",
             "transaction_id": order.transaction_id,
             "customer_name": order.customer_name,
             "customer_phone": order.customer_phone,
@@ -707,6 +908,7 @@ async def verify_payment(
     }
 
 
+@router.post("/payments/razorpay-webhook")
 @router.post("/orders/webhook/razorpay")
 async def razorpay_webhook(
     request: Request,
@@ -714,50 +916,71 @@ async def razorpay_webhook(
 ):
     """
     Direct server-to-server webhook from Razorpay for payment status synchronization.
-    Verifies raw body signature using configured RAZORPAY_KEY_SECRET.
+    Verifies raw body HMAC-SHA256 signature using configured RAZORPAY_WEBHOOK_SECRET or RAZORPAY_KEY_SECRET.
+    Transitions orders to 'confirmed' / 'paid' asynchronously without relying on client callbacks.
     """
+    import re
+    import json as _json
+
     raw_body = await request.body()
     received_signature = request.headers.get("X-Razorpay-Signature")
 
-    razorpay_secret = settings.RAZORPAY_KEY_SECRET or os.getenv("RAZORPAY_KEY_SECRET", "")
-    if not razorpay_secret and settings.APP_ENV in ("production", "prod", "staging"):
+    possible_secrets = [
+        s for s in [
+            settings.RAZORPAY_WEBHOOK_SECRET,
+            settings.RAZORPAY_KEY_SECRET,
+            os.getenv("RAZORPAY_WEBHOOK_SECRET"),
+            os.getenv("RAZORPAY_KEY_SECRET"),
+        ] if s
+    ]
+    if not possible_secrets and settings.APP_ENV in ("production", "prod", "staging"):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Razorpay webhook secret is not configured on server.",
         )
-    if razorpay_secret:
+    if possible_secrets:
         if not received_signature:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Missing X-Razorpay-Signature header.",
             )
-        computed_sig = hmac.new(
-            razorpay_secret.encode("utf-8"),
-            raw_body,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(computed_sig, received_signature):
+        valid_sig = any(
+            hmac.compare_digest(
+                hmac.new(sec.encode("utf-8"), raw_body, hashlib.sha256).hexdigest(),
+                received_signature,
+            )
+            for sec in possible_secrets
+        )
+        if not valid_sig:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid webhook signature.",
             )
 
     try:
-        import json as _json
         event_payload = _json.loads(raw_body.decode("utf-8"))
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload in webhook body.")
 
     event_type = event_payload.get("event", "")
-    payment_entity = event_payload.get("payload", {}).get("payment", {}).get("entity", {})
-    refund_entity = event_payload.get("payload", {}).get("refund", {}).get("entity", {})
-    order_id = payment_entity.get("order_id", "")
+    payload_data = event_payload.get("payload", {})
+    payment_entity = payload_data.get("payment", {}).get("entity", {})
+    order_entity = payload_data.get("order", {}).get("entity", {})
+    refund_entity = payload_data.get("refund", {}).get("entity", {})
+
+    order_id = payment_entity.get("order_id", "") or order_entity.get("id", "")
     payment_id = payment_entity.get("id", "") or refund_entity.get("payment_id", "")
-    notes = payment_entity.get("notes", {}) or refund_entity.get("notes", {})
-    order_number = notes.get("order_number") or notes.get("tr")
+    notes = payment_entity.get("notes", {}) or order_entity.get("notes", {}) or refund_entity.get("notes", {})
+    order_number = notes.get("order_number") or notes.get("tr") or order_entity.get("receipt")
 
     if not order_number and order_id and order_id.startswith("rzp_order_MA24_ORD_"):
         order_number = order_id.replace("rzp_order_", "").replace("_", "-")
+
+    if not order_number:
+        description = payment_entity.get("description", "") or order_entity.get("description", "")
+        match = re.search(r"MA24-ORD-\d+", description)
+        if match:
+            order_number = match.group(0)
 
     order = None
     if order_number:
@@ -765,98 +988,150 @@ async def razorpay_webhook(
     elif payment_id:
         order = db.query(Order).filter(Order.transaction_id == payment_id).first()
 
-    if order:
-        if event_type in ("payment.captured", "order.paid"):
-            # Currency validation: only INR is accepted
-            currency = payment_entity.get("currency")
-            if currency and currency.upper() != "INR":
+    if not order:
+        logger.warning(
+            f"[webhook] Received Razorpay event '{event_type}' for unmapped order: "
+            f"order_number={order_number}, order_id={order_id}, payment_id={payment_id}"
+        )
+        return {
+            "status": "ignored",
+            "event": event_type,
+            "message": f"No active order matched identifier (order_number={order_number}, payment_id={payment_id}).",
+        }
+
+    if event_type in ("payment.captured", "order.paid"):
+        # Currency validation: only INR is accepted
+        currency = payment_entity.get("currency") or order_entity.get("currency")
+        if currency and currency.upper() != "INR":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported currency '{currency}'. Only INR transactions are accepted.",
+            )
+
+        # Idempotent duplicate event check
+        if order.payment_status == "paid":
+            if order.transaction_id == payment_id:
+                return {
+                    "status": "ok",
+                    "event": event_type,
+                    "order_number": order.order_number,
+                    "order_status": order.status,
+                    "payment_status": order.payment_status,
+                    "message": "Duplicate payment event ignored (idempotent confirmation).",
+                }
+            else:
+                logger.warning(
+                    f"[webhook] Payment ID conflict for order {order.order_number}: "
+                    f"existing={order.transaction_id}, incoming={payment_id}"
+                )
+                return {
+                    "status": "ignored",
+                    "event": event_type,
+                    "order_number": order.order_number,
+                    "detail": "Order already settled with another payment ID.",
+                }
+
+        # Underpayment protection: Razorpay reports amount in paise
+        paid_amount_paise = payment_entity.get("amount") or order_entity.get("amount_paid") or order_entity.get("amount")
+        if paid_amount_paise is not None:
+            expected_paise = int(round(order.final_payable * 100))
+            if abs(paid_amount_paise - expected_paise) > 5:
+                logger.warning(
+                    f"[webhook] Amount mismatch on order {order.order_number}: "
+                    f"expected {expected_paise} paise, received {paid_amount_paise} paise."
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported currency '{currency}'. Only INR transactions are accepted.",
+                    detail="Paid amount mismatch against order final payable.",
                 )
 
-            # Idempotent duplicate event check
-            if order.payment_status == "paid":
-                if order.transaction_id == payment_id:
-                    return {"status": "ok", "message": "Duplicate payment event ignored (idempotent)."}
-                else:
-                    logger.warning(
-                        f"[webhook] Payment ID conflict for order {order.order_number}: "
-                        f"existing={order.transaction_id}, incoming={payment_id}"
-                    )
-                    return {"status": "ignored", "detail": "Order already settled with another payment ID."}
-
-            # Underpayment protection: Razorpay reports amount in paise
-            paid_amount_paise = payment_entity.get("amount")
-            if paid_amount_paise is not None:
-                expected_paise = int(round(order.final_payable * 100))
-                if abs(paid_amount_paise - expected_paise) > 5:
-                    logger.warning(
-                        f"[webhook] Amount mismatch on order {order.order_number}: "
-                        f"expected {expected_paise} paise, received {paid_amount_paise} paise."
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Paid amount mismatch against order final payable.",
-                    )
-
-            # Check if order was already cancelled before webhook arrived
-            if order.status == "cancelled":
-                order.payment_status = "refund_pending"
-                order.notes = (order.notes or "") + f" [Webhook: payment captured after cancellation, refund pending for {payment_id}]"
-                order.updated_at = datetime.datetime.utcnow()
-                db.commit()
-            else:
-                order.payment_status = "paid"
-                order.transaction_id = payment_id or order.transaction_id
-                order.status = "confirmed"
-                order.updated_at = datetime.datetime.utcnow()
-                db.commit()
-
-                # Broadcast
-                try:
-                    status_msg = {
-                        "type": "ORDER_STATUS_UPDATE",
-                        "order_number": order.order_number,
-                        "status": order.status,
-                        "payment_status": "paid",
-                        "transaction_id": order.transaction_id,
-                        "updated_at": order.updated_at.isoformat(),
-                    }
-                    await ws_manager.broadcast_order_update(order.order_number, order.status, status_msg)
-                except Exception:
-                    pass
-
-        elif event_type == "payment.failed":
-            if order.payment_status != "paid":
-                order.payment_status = "failed"
-                order.updated_at = datetime.datetime.utcnow()
-                db.commit()
-
-        elif event_type in ("refund.processed", "refund.created"):
-            refund_id_str = refund_entity.get("id", "REFUND")
-            refund_amount_paise = refund_entity.get("amount", 0)
-            order.payment_status = "refunded"
-            if order.status != "cancelled":
-                order.status = "cancelled"
-            order.notes = (order.notes or "") + f" [Refund: {refund_id_str} processed for ₹{refund_amount_paise / 100:.2f}]"
+        # Check if order was already cancelled before webhook arrived
+        if order.status == "cancelled":
+            order.payment_status = "refund_pending"
+            order.notes = (order.notes or "") + f" [Webhook: payment captured after cancellation, refund pending for {payment_id}]"
             order.updated_at = datetime.datetime.utcnow()
             db.commit()
+            db.refresh(order)
+        else:
+            order.payment_status = "paid"
+            order.transaction_id = payment_id or order.transaction_id
+            if order.status == "placed":
+                order.status = "confirmed"
+            order.updated_at = datetime.datetime.utcnow()
+            db.commit()
+            db.refresh(order)
+
+            # Broadcast status update to order channel and merchant dashboard
+            try:
+                status_msg = {
+                    "type": "ORDER_STATUS_UPDATE",
+                    "order_number": order.order_number,
+                    "status": order.status,
+                    "payment_status": order.payment_status,
+                    "transaction_id": order.transaction_id,
+                    "updated_at": order.updated_at.isoformat(),
+                }
+                await ws_manager.broadcast_order_update(order.order_number, order.status, status_msg)
+                biz_id = str(order.business_id or "biz-daily-brew")
+                await ws_manager.send_merchant_event(biz_id, "ORDER_STATUS_UPDATE", status_msg)
+            except Exception as e:
+                logger.warning(f"[ws] Could not broadcast webhook payment update: {e}")
+
+    elif event_type == "payment.failed":
+        if order.payment_status != "paid":
+            order.payment_status = "failed"
+            order.notes = (order.notes or "") + f" [Webhook: payment failed for {payment_id}]"
+            order.updated_at = datetime.datetime.utcnow()
+            db.commit()
+            db.refresh(order)
 
             try:
                 status_msg = {
                     "type": "ORDER_STATUS_UPDATE",
                     "order_number": order.order_number,
                     "status": order.status,
-                    "payment_status": "refunded",
-                    "transaction_id": order.transaction_id,
+                    "payment_status": "failed",
+                    "transaction_id": payment_id,
                     "updated_at": order.updated_at.isoformat(),
                 }
                 await ws_manager.broadcast_order_update(order.order_number, order.status, status_msg)
             except Exception:
                 pass
 
-    return {"status": "ok", "event": event_type}
+    elif event_type in ("refund.processed", "refund.created"):
+        refund_id_str = refund_entity.get("id", "REFUND")
+        refund_amount_paise = refund_entity.get("amount", 0)
+        order.payment_status = "refunded"
+        if order.status != "cancelled":
+            order.status = "cancelled"
+        order.notes = (order.notes or "") + f" [Refund: {refund_id_str} processed for ₹{refund_amount_paise / 100:.2f}]"
+        order.updated_at = datetime.datetime.utcnow()
+        db.commit()
+        db.refresh(order)
+
+        try:
+            status_msg = {
+                "type": "ORDER_STATUS_UPDATE",
+                "order_number": order.order_number,
+                "status": order.status,
+                "payment_status": "refunded",
+                "transaction_id": order.transaction_id,
+                "updated_at": order.updated_at.isoformat(),
+            }
+            await ws_manager.broadcast_order_update(order.order_number, order.status, status_msg)
+            biz_id = str(order.business_id or "biz-daily-brew")
+            await ws_manager.send_merchant_event(biz_id, "ORDER_STATUS_UPDATE", status_msg)
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "event": event_type,
+        "order_number": order.order_number,
+        "order_status": order.status,
+        "payment_status": order.payment_status,
+        "transaction_id": order.transaction_id,
+    }
 
 
 # ---------------------------------------------------------

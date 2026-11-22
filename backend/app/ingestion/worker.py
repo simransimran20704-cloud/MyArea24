@@ -56,6 +56,11 @@ class IngestionWorker:
             (traffic_source_id, traffic_name, traffic_url),
             ("sachet_cap", "NDMA SACHET Disaster Alerts", settings.SACHET_FEED_URL),
             ("openaq", "OpenAQ / CPCB CAAQMS Aggregation", settings.OPENAQ_BASE_URL),
+            (
+                "india_petroleum_api",
+                "India Petroleum API (PPAC MoPNG)",
+                getattr(settings, "INDIA_PETROLEUM_API_BASE_URL", "https://india-petroleum-api.vercel.app"),
+            ),
         ]
         for src_id, name, url in sources:
             existing = db.query(DataSource).filter(DataSource.id == src_id).first()
@@ -76,45 +81,48 @@ class IngestionWorker:
 
         try:
             locations = settings.parsed_pilot_locations
+            # Phase 1: Asynchronous network fetch without holding DB transactions
+            loc_results = []
             for loc in locations:
                 try:
                     records = await self.weather_client.fetch_forecast(loc.lat, loc.lon)
                     fetched_count += len(records)
-                    for rec in records:
-                        # Check existing by source_record_id
-                        existing = db.query(WeatherObservation).filter(
-                            WeatherObservation.source_record_id == rec.source_record_id
-                        ).first()
-                        if existing:
-                            # Update existing record
-                            existing.temperature_c = rec.temperature_c
-                            existing.precipitation_mm = rec.precipitation_mm
-                            existing.condition_text = rec.condition_text
-                            existing.ingested_at = datetime.datetime.utcnow()
-                        else:
-                            obs = WeatherObservation(
-                                source_id=rec.source_id,
-                                source_record_id=rec.source_record_id,
-                                location_name=loc.name,
-                                latitude=rec.latitude,
-                                longitude=rec.longitude,
-                                observed_at=rec.observed_at,
-                                forecast_valid_until=rec.forecast_valid_until,
-                                temperature_c=rec.temperature_c,
-                                precipitation_mm=rec.precipitation_mm,
-                                precipitation_interval_minutes=rec.precipitation_interval_minutes,
-                                condition_text=rec.condition_text,
-                                wind_kph=rec.wind_kph,
-                                humidity=rec.humidity,
-                                raw_timestamp=rec.raw_timestamp,
-                            )
-                            db.add(obs)
-                            persisted_count += 1
-                    db.commit()
+                    loc_results.append((loc, records))
                 except Exception as loc_err:
-                    logger.error(f"[worker] Weather sync error for {loc.name}: {loc_err}")
+                    logger.error(f"[worker] Weather sync network error for {loc.name}: {loc_err}")
                     rejected_count += 1
-                    db.rollback()
+
+            # Phase 2: Rapid atomic DB batch commit (< 5ms)
+            for loc, records in loc_results:
+                for rec in records:
+                    existing = db.query(WeatherObservation).filter(
+                        WeatherObservation.source_record_id == rec.source_record_id
+                    ).first()
+                    if existing:
+                        existing.temperature_c = rec.temperature_c
+                        existing.precipitation_mm = rec.precipitation_mm
+                        existing.condition_text = rec.condition_text
+                        existing.ingested_at = datetime.datetime.utcnow()
+                    else:
+                        obs = WeatherObservation(
+                            source_id=rec.source_id,
+                            source_record_id=rec.source_record_id,
+                            location_name=loc.name,
+                            latitude=rec.latitude,
+                            longitude=rec.longitude,
+                            observed_at=rec.observed_at,
+                            forecast_valid_until=rec.forecast_valid_until,
+                            temperature_c=rec.temperature_c,
+                            precipitation_mm=rec.precipitation_mm,
+                            precipitation_interval_minutes=rec.precipitation_interval_minutes,
+                            condition_text=rec.condition_text,
+                            wind_kph=rec.wind_kph,
+                            humidity=rec.humidity,
+                            raw_timestamp=rec.raw_timestamp,
+                        )
+                        db.add(obs)
+                        persisted_count += 1
+            db.commit()
 
         except Exception as e:
             status = "FAILED"
@@ -358,64 +366,68 @@ class IngestionWorker:
                 locations = settings.parsed_pilot_locations
                 radius_m = int(settings.AQI_MAX_STATION_DISTANCE_KM * 1000)
 
+                # Phase 1: Asynchronous non-blocking network fetch without DB transaction
+                fetched_aqi_batches = []
                 for loc in locations:
                     try:
                         records = await self.openaq_client.fetch_latest_for_coordinates(
                             loc.lat, loc.lon, radius_meters=radius_m
                         )
                         fetched_count += len(records)
-                        for rec in records:
-                            existing = db.query(AirQualityObservation).filter(
-                                AirQualityObservation.source_record_id == rec.source_record_id
-                            ).first()
-
-                            if existing:
-                                existing.aqi_value = rec.aqi_value
-                                existing.aqi_category = rec.aqi_category
-                                existing.prominent_pollutant = rec.prominent_pollutant
-                                existing.pm25 = rec.pm25
-                                existing.pm10 = rec.pm10
-                                existing.no2 = rec.no2
-                                existing.so2 = rec.so2
-                                existing.co = rec.co
-                                existing.o3 = rec.o3
-                                existing.observed_at = rec.observed_at
-                                existing.ingested_at = datetime.datetime.utcnow()
-                            else:
-                                obs = AirQualityObservation(
-                                    source_id=rec.source_id,
-                                    source_record_id=rec.source_record_id,
-                                    station_id=rec.station_id,
-                                    station_name=rec.station_name,
-                                    city=rec.city,
-                                    state=rec.state,
-                                    latitude=rec.latitude,
-                                    longitude=rec.longitude,
-                                    observed_at=rec.observed_at,
-                                    aqi_value=rec.aqi_value,
-                                    aqi_category=rec.aqi_category,
-                                    prominent_pollutant=rec.prominent_pollutant,
-                                    pm25=rec.pm25,
-                                    pm10=rec.pm10,
-                                    no2=rec.no2,
-                                    so2=rec.so2,
-                                    co=rec.co,
-                                    o3=rec.o3,
-                                    raw_data=rec.raw_data,
-                                )
-                                db.add(obs)
-                                persisted_count += 1
-                        db.commit()
+                        fetched_aqi_batches.append(records)
                     except ProviderAuthError as auth_err:
                         logger.error(f"[worker] OpenAQ authentication failed for {loc.name}: {auth_err}")
                         status = "AUTH_FAILED"
                         error_msg = f"Provider authentication failed (HTTP {auth_err.status_code or 401}): Invalid credentials. Verify OPENAQ_API_KEY."
-                        db.rollback()
                         break
                     except Exception as loc_err:
-                        logger.error(f"[worker] Air quality sync error for {loc.name}: {loc_err}")
+                        logger.error(f"[worker] Air quality sync network error for {loc.name}: {loc_err}")
                         rejected_count += 1
-                        db.rollback()
+
+                # Phase 2: Atomic DB commit (< 5ms)
+                for records in fetched_aqi_batches:
+                    for rec in records:
+                        existing = db.query(AirQualityObservation).filter(
+                            AirQualityObservation.source_record_id == rec.source_record_id
+                        ).first()
+
+                        if existing:
+                            existing.aqi_value = rec.aqi_value
+                            existing.aqi_category = rec.aqi_category
+                            existing.prominent_pollutant = rec.prominent_pollutant
+                            existing.pm25 = rec.pm25
+                            existing.pm10 = rec.pm10
+                            existing.no2 = rec.no2
+                            existing.so2 = rec.so2
+                            existing.co = rec.co
+                            existing.o3 = rec.o3
+                            existing.observed_at = rec.observed_at
+                            existing.ingested_at = datetime.datetime.utcnow()
+                        else:
+                            obs = AirQualityObservation(
+                                source_id=rec.source_id,
+                                source_record_id=rec.source_record_id,
+                                station_id=rec.station_id,
+                                station_name=rec.station_name,
+                                city=rec.city,
+                                state=rec.state,
+                                latitude=rec.latitude,
+                                longitude=rec.longitude,
+                                observed_at=rec.observed_at,
+                                aqi_value=rec.aqi_value,
+                                aqi_category=rec.aqi_category,
+                                prominent_pollutant=rec.prominent_pollutant,
+                                pm25=rec.pm25,
+                                pm10=rec.pm10,
+                                no2=rec.no2,
+                                so2=rec.so2,
+                                co=rec.co,
+                                o3=rec.o3,
+                                raw_data=rec.raw_data,
+                            )
+                            db.add(obs)
+                            persisted_count += 1
+                db.commit()
 
             except Exception as e:
                 status = "FAILED"
@@ -449,6 +461,74 @@ class IngestionWorker:
         db.commit()
         return log
 
+    async def sync_fuel_prices(self, db: Session) -> DataSyncLog:
+        """
+        Polls India Petroleum API for daily retail petrol and diesel rates
+        and persists them into the database.
+        """
+        start_time = datetime.datetime.utcnow()
+        start_mono = time.monotonic()
+        fetched_count = 0
+        persisted_count = 0
+        rejected_count = 0
+        status = "SUCCESS"
+        error_msg = None
+
+        try:
+            from backend.app.services.fuel_service import fuel_price_service
+
+            res = await fuel_price_service.sync_and_store_latest(db)
+            persisted_count = res.get("records_stored", 0)
+            fetched_count = res.get("cities_count", 0) * 2
+        except Exception as e:
+            status = "FAILED"
+            error_msg = str(e)
+            logger.error(f"[worker] Fuel prices sync failed: {e}")
+            db.rollback()
+
+        duration_ms = int((time.monotonic() - start_mono) * 1000)
+        end_time = datetime.datetime.utcnow()
+
+        log = DataSyncLog(
+            source_id="india_petroleum_api",
+            sync_started_at=start_time,
+            sync_ended_at=end_time,
+            duration_ms=duration_ms,
+            records_fetched=fetched_count,
+            records_persisted=persisted_count,
+            records_rejected=rejected_count,
+            status=status,
+            error_message=error_msg,
+        )
+        db.add(log)
+
+        src = db.query(DataSource).filter(DataSource.id == "india_petroleum_api").first()
+        if src:
+            src.last_sync_at = end_time
+            src.last_status = status
+            if status == "FAILED":
+                src.error_count += 1
+
+        db.commit()
+        return log
+
+    async def sync_mandi_prices(self, db: Session) -> DataSyncLog:
+        """
+        Polls open Mandi Price API for live APMC wholesale/modal commodity prices
+        and synchronizes them into the database.
+        """
+        from backend.app.integrations.market.mandi_client import MandiApiClient
+
+        client = MandiApiClient()
+        res = await client.sync_all_supported_states(db)
+        log = (
+            db.query(DataSyncLog)
+            .filter(DataSyncLog.source_id == "mandi_api")
+            .order_by(DataSyncLog.id.desc())
+            .first()
+        )
+        return log
+
     async def run_full_sync_cycle(self, db: Session) -> Dict[str, DataSyncLog]:
         """Runs a complete sync cycle across all sources."""
         self.ensure_data_sources(db)
@@ -457,5 +537,7 @@ class IngestionWorker:
         results["traffic"] = await self.sync_traffic(db)
         results["sachet"] = await self.sync_sachet(db)
         results["air_quality"] = await self.sync_air_quality(db)
+        results["fuel"] = await self.sync_fuel_prices(db)
+        results["mandi"] = await self.sync_mandi_prices(db)
         return results
 

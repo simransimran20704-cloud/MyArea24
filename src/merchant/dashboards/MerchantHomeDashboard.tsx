@@ -156,9 +156,9 @@ export function MerchantHomeDashboard({
   const avgRating =
     reviews.length > 0
       ? (reviews.reduce((a, r) => a + r.rating, 0) / reviews.length).toFixed(1)
-      : business.rating
+      : business.rating && business.rating > 0
       ? business.rating.toFixed(1)
-      : '5.0';
+      : 'New';
 
   return (
     <div className="space-y-6">
@@ -340,7 +340,7 @@ export function MerchantHomeDashboard({
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-indigo-600" />
             <h3 className="text-sm font-extrabold text-slate-900">
-              Overview <span className="text-xs font-normal text-slate-500">(Live Store Telemetry)</span>
+              Overview <span className="text-xs font-normal text-slate-500">(Live Store Activity)</span>
             </h3>
           </div>
           <div className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-600 shadow-2xs">

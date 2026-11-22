@@ -12,6 +12,11 @@ from backend.app.database.models import Business, Product, Offer, ServiceListing
 from backend.app.database.session import get_db
 from backend.app.intelligence.rules import haversine_distance_km
 from backend.app.services.business_discovery_service import sync_live_businesses, extract_locality_tokens
+from backend.app.services.indian_search_synonyms import (
+    expand_search_query,
+    get_implied_categories_for_query,
+)
+from backend.app.intelligence.ranking_engine import RankingEngine
 
 router = APIRouter(prefix="/api/v1/businesses", tags=["Local Businesses & Directory"])
 
@@ -93,6 +98,8 @@ class BusinessItemResponse(BaseModel):
     is_open_now: bool = True
     active_products_count: int = 0
     active_offers_count: int = 0
+    ranking_score: Optional[float] = None
+    ranking_explanation: Optional[str] = None
 
 
 def generate_slug(name: str, locality: str, db: Session) -> str:
@@ -133,6 +140,7 @@ def list_businesses(
     category: Optional[str] = Query(None, description="Filter by business category"),
     locality: Optional[str] = Query(None, description="Filter by locality or area"),
     city: Optional[str] = Query(None, description="Filter by city"),
+    pincode: Optional[str] = Query(None, description="Filter by postal pincode"),
     user_lat: Optional[float] = Query(None, description="User latitude for distance sorting"),
     user_lon: Optional[float] = Query(None, description="User longitude for distance sorting"),
     open_now: Optional[bool] = Query(None, description="Filter only stores open now"),
@@ -161,42 +169,74 @@ def list_businesses(
         except Exception:
             pass
 
-    # Dynamic live business discovery if coordinates provided and businesses in area are low
+    # Dynamic live business discovery if coordinates provided and businesses in area are low (using spatial index)
     if user_lat is not None and user_lon is not None:
         try:
-            nearby_count = db.query(Business).filter(
-                (Business.latitude - user_lat) * (Business.latitude - user_lat)
-                + (Business.longitude - user_lon) * (Business.longitude - user_lon) <= 0.04
-            ).count()
-            if nearby_count < 4:
+            nearby_list = Business.query_nearby(db, user_lat, user_lon, radius_km=15.0, limit=4)
+            if len(nearby_list) < 4:
                 sync_live_businesses(db, user_lat, user_lon, disp_city or city, disp_locality or locality)
         except Exception:
             pass
 
     query = db.query(Business).filter(Business.status == "active")
 
-    SYNONYM_MAP = {
-        "dawa": "Pharmacy", "dawai": "Pharmacy", "medicine": "Pharmacy", "chemist": "Pharmacy", "medical": "Pharmacy",
-        "sabzi": "Grocery", "vegetable": "Grocery", "ration": "Grocery", "kirana": "Grocery", "supermarket": "Grocery",
-        "mithai": "Food & Dining", "sweets": "Food & Dining", "chai": "Food & Dining", "cafe": "Food & Dining", "restaurant": "Food & Dining",
-        "phone": "Electronics", "mobile": "Electronics", "laptop": "Electronics",
-        "bijli": "Electrician", "plumber": "Services", "salon": "Services", "parlour": "Services"
-    }
+    if pincode and pincode.strip():
+        query = query.filter(Business.pincode == pincode.strip())
+
+    is_postgres = False
+    try:
+        bind = db.get_bind()
+        if bind and bind.dialect.name == "postgresql":
+            is_postgres = True
+    except Exception:
+        pass
 
     if q:
         cleaned_q = q.strip().lower()
-        term = f"%{cleaned_q}%"
-        q_clauses = [
-            func.lower(Business.name).like(term),
-            func.lower(Business.category).like(term),
-            func.lower(Business.description).like(term),
-            func.lower(Business.locality).like(term),
-        ]
-        for syn_word, syn_target in SYNONYM_MAP.items():
-            if syn_word in cleaned_q:
-                q_clauses.append(func.lower(Business.category).like(f"%{syn_target.lower()}%"))
-                q_clauses.append(func.lower(Business.name).like(f"%{syn_target.lower()}%"))
-        query = query.filter(or_(*q_clauses))
+        expanded_terms = expand_search_query(cleaned_q, max_terms=15)
+        implied_categories = get_implied_categories_for_query(cleaned_q)
+        q_clauses = []
+
+        if is_postgres:
+            ts_query = func.plainto_tsquery('english', cleaned_q)
+            ts_vector = func.to_tsvector(
+                'english',
+                func.concat_ws(' ', Business.name, Business.category, Business.subcategory, Business.description, Business.locality, Business.address)
+            )
+            q_clauses.append(ts_vector.op('@@')(ts_query))
+
+            # PostgreSQL pg_trgm trigram similarity for typo tolerance (e.g. 'apolo' -> 'Apollo Pharmacy')
+            if len(cleaned_q) >= 3:
+                q_clauses.append(func.similarity(Business.name, cleaned_q) >= 0.25)
+
+            for term in expanded_terms:
+                pat = f"%{term}%"
+                q_clauses.append(func.lower(Business.name).like(pat))
+                q_clauses.append(func.lower(Business.category).like(pat))
+                q_clauses.append(func.lower(Business.subcategory).like(pat))
+                q_clauses.append(func.lower(Business.description).like(pat))
+                q_clauses.append(func.lower(Business.locality).like(pat))
+
+            for cat in implied_categories:
+                q_clauses.append(func.lower(Business.category).like(f"%{cat.lower()}%"))
+                q_clauses.append(func.lower(Business.subcategory).like(f"%{cat.lower()}%"))
+                q_clauses.append(func.lower(Business.name).like(f"%{cat.lower()}%"))
+        else:
+            for term in expanded_terms:
+                pat = f"%{term}%"
+                q_clauses.append(func.lower(Business.name).like(pat))
+                q_clauses.append(func.lower(Business.category).like(pat))
+                q_clauses.append(func.lower(Business.subcategory).like(pat))
+                q_clauses.append(func.lower(Business.description).like(pat))
+                q_clauses.append(func.lower(Business.locality).like(pat))
+
+            for cat in implied_categories:
+                q_clauses.append(func.lower(Business.category).like(f"%{cat.lower()}%"))
+                q_clauses.append(func.lower(Business.subcategory).like(f"%{cat.lower()}%"))
+                q_clauses.append(func.lower(Business.name).like(f"%{cat.lower()}%"))
+
+        if q_clauses:
+            query = query.filter(or_(*q_clauses))
 
     if category:
         query = query.filter(func.lower(Business.category) == category.strip().lower())
@@ -250,8 +290,8 @@ def list_businesses(
     # Direct SQL total count calculation
     total = query.count()
 
-    # Graceful fallback: If strict token filter yielded 0 results, show closest active businesses
-    if total == 0 and (locality or city):
+    # Graceful fallback: If strict token filter yielded 0 results, show closest active businesses (unless strict pincode was requested)
+    if total == 0 and (locality or city) and not pincode:
         fallback_query = db.query(Business).filter(Business.status == "active")
         if category:
             fallback_query = fallback_query.filter(func.lower(Business.category) == category.strip().lower())
@@ -308,6 +348,21 @@ def list_businesses(
 
         open_status = check_is_open_now(b.opening_time, b.closing_time)
 
+        rank_score, rank_meta = RankingEngine.rank_item(
+            name=b.name,
+            category=b.category,
+            distance_km=dist,
+            is_verified=b.is_verified,
+            rating=float(b.rating or 4.0),
+            review_count=int(b.review_count or 0),
+            is_open_now=open_status,
+            active_offers_count=offer_counts.get(b.id, 0),
+            active_products_count=prod_counts.get(b.id, 0),
+            query_terms=q.split() if q else None,
+            subcategory=b.subcategory,
+            description=b.description,
+        )
+
         results.append(
             BusinessItemResponse(
                 id=b.id,
@@ -342,8 +397,13 @@ def list_businesses(
                 is_open_now=open_status,
                 active_products_count=prod_counts.get(b.id, 0),
                 active_offers_count=offer_counts.get(b.id, 0),
+                ranking_score=rank_score,
+                ranking_explanation=rank_meta["explanation"],
             )
         )
+
+    if sort_by in ("recommended", "relevance") or not sort_by:
+        results.sort(key=lambda x: (x.ranking_score or 0.0), reverse=True)
 
     return {
         "items": [item.dict() for item in results],
@@ -438,6 +498,8 @@ def get_business_detail(
             "opening_time": business.opening_time,
             "closing_time": business.closing_time,
             "days_open": business.days_open,
+            "fssai_license_number": business.fssai_license_number,
+            "gstin": business.gstin,
             "image_url": business.image_url,
             "is_verified": business.is_verified,
             "status": business.status,
@@ -516,6 +578,29 @@ def create_business(
     """
     Onboards a merchant and creates a digital storefront.
     """
+    # Duplicate prevention: Check if store with same name in same locality already exists for user/phone
+    phone_to_check = req.phone or user.phone
+    existing_store = (
+        db.query(Business)
+        .filter(
+            func.lower(Business.name) == req.name.strip().lower(),
+            func.lower(Business.locality) == req.locality.strip().lower(),
+            or_(
+                Business.owner_id == user.id,
+                Business.phone == phone_to_check if phone_to_check else False,
+            ),
+        )
+        .first()
+    )
+    if existing_store:
+        return {
+            "id": existing_store.id,
+            "slug": existing_store.slug,
+            "name": existing_store.name,
+            "message": "Store profile already exists. Retrieved existing listing idempotently.",
+            "is_duplicate": True,
+        }
+
     slug = generate_slug(req.name, req.locality, db)
     
     # Auto-upgrade user role to merchant if resident

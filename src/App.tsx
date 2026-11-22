@@ -9,10 +9,12 @@ import {
   INITIAL_FALLBACK_LOCATION,
   CartItem,
 } from './types';
+import { FEATURE_FLAGS } from './config/featureFlags';
 import { NAV_ITEMS, INITIAL_SAVED_ITEMS } from './data/mockData';
 import {
   useLiveIntelligence,
   askLiveAiAssistant,
+  streamLiveAiAssistant,
   LiveAlertItem,
 } from './services/liveIntelligence';
 import {
@@ -34,7 +36,24 @@ import {
   CIVIC_ALERT_EVENT,
   RealtimeConnectionStatus,
 } from './services/realtimeService';
+import {
+  useLocationStore,
+  useCartStore,
+  useSavedStore,
+  useIntelligenceStore,
+  useMarketplaceStore,
+  useUIStore,
+} from './stores';
+import { useTranslation } from 'react-i18next';
+
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ComplianceFooter } from './components/ComplianceFooter';
+import { CartConflictModal } from './components/CartConflictModal';
+import { DPDPConsentBanner } from './components/DPDPConsentBanner';
+import { LocationPermissionPrompt } from './components/LocationPermissionPrompt';
+import { NotificationPermissionPrompt } from './components/NotificationPermissionPrompt';
+import { AuthPermissionPrompt } from './components/AuthPermissionPrompt';
+import { analytics } from './services/analyticsService';
 
 // Code-split dynamic imports for massive initial bundle reduction
 const AuthModal = React.lazy(() =>
@@ -53,24 +72,24 @@ const MerchantPortal = React.lazy(() =>
   import('./merchant/MerchantPortal').then((m) => ({ default: m.MerchantPortal }))
 );
 
-// Main Dashboards (Code-split)
+// Main Dashboards (Code-split into individual modular chunks)
 const HomeDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.HomeDashboard }))
+  import('./dashboards/main/HomeDashboard').then((m) => ({ default: m.HomeDashboard }))
 );
 const BusinessesDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.BusinessesDashboard }))
+  import('./dashboards/main/BusinessesDashboard').then((m) => ({ default: m.BusinessesDashboard }))
 );
 const ProductsDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.ProductsDashboard }))
+  import('./dashboards/main/ProductsDashboard').then((m) => ({ default: m.ProductsDashboard }))
 );
 const ServicesDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.ServicesDashboard }))
+  import('./dashboards/main/ServicesDashboard').then((m) => ({ default: m.ServicesDashboard }))
 );
 const OffersDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.OffersDashboard }))
+  import('./dashboards/main/OffersDashboard').then((m) => ({ default: m.OffersDashboard }))
 );
 const EventsDashboard = React.lazy(() =>
-  import('./dashboards/MainDashboards').then((m) => ({ default: m.EventsDashboard }))
+  import('./dashboards/main/EventsDashboard').then((m) => ({ default: m.EventsDashboard }))
 );
 
 // Intelligence Dashboards (Code-split)
@@ -116,10 +135,7 @@ const MyOrdersDashboard = React.lazy(() =>
   import('./dashboards/MyOrdersDashboard').then((m) => ({ default: m.MyOrdersDashboard }))
 );
 
-// Mobile App View & Location Modal (Code-split)
-const MobileAppView = React.lazy(() =>
-  import('./components/MobileAppView').then((m) => ({ default: m.MobileAppView }))
-);
+// Location Modal (Code-split)
 const LocationPickerModal = React.lazy(() =>
   import('./components/LocationPickerModal').then((m) => ({ default: m.LocationPickerModal }))
 );
@@ -127,6 +143,7 @@ const LocationPickerModal = React.lazy(() =>
 import {
   Home,
   Store,
+  LayoutGrid,
   Package,
   Wrench,
   Tag,
@@ -231,30 +248,30 @@ function MobileLoadingSkeleton() {
   );
 }
 
-function useIsDesktop(): boolean {
-  const [isDesktop, setIsDesktop] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
-  );
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const mql = window.matchMedia('(min-width: 1024px)');
-    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
-    setIsDesktop(mql.matches);
-    mql.addEventListener('change', handler);
-    return () => mql.removeEventListener('change', handler);
-  }, []);
-
-  return isDesktop;
-}
-
 export function App() {
-  const isDesktop = useIsDesktop();
+  const { t } = useTranslation();
+
+  const getNavLabel = (id: string, defaultLabel: string) => {
+    const map: Record<string, string> = {
+      home: t('nav.home'),
+      explore: t('nav.explore'),
+      local_commerce: t('nav.market'),
+      orders: t('nav.orders'),
+      saved: t('nav.saved'),
+      emergency: t('nav.emergency'),
+      weather: t('nav.weather'),
+      'air-quality': t('nav.airQuality'),
+      traffic: t('nav.traffic'),
+      'ai-assistant': t('nav.aiAssistant'),
+      'citizen-desk': t('nav.help'),
+    };
+    return map[id] || defaultLabel;
+  };
+
   // Merchant Registration Profile (Startup Verification State)
   const [merchantProfile, setMerchantProfile] = useState<MerchantRegistrationProfile | null>(() => {
     return getStoredMerchantProfile();
   });
-  const [merchantRegModalOpen, setMerchantRegModalOpen] = useState(false);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -292,16 +309,46 @@ export function App() {
     'my-orders': 'my-orders',
     'my-bookings': 'my-orders',
     orders: 'my-orders',
+    // Preserved routes for Residential Rental Benchmark:
+    // When ENABLE_RESIDENTIAL_RENTAL_BENCHMARK is true, these map to the feature.
+    // When false, these routes remain disabled and redirect users to home.
+    ...(FEATURE_FLAGS.ENABLE_RESIDENTIAL_RENTAL_BENCHMARK
+      ? {
+          'rental-benchmark': 'market-rates' as DashboardId,
+          rentals: 'market-rates' as DashboardId,
+          'residential-benchmark': 'market-rates' as DashboardId,
+        }
+      : {}),
   };
 
   const activeDashboard: DashboardId = isMerchantPortal
     ? 'home'
     : (VALID_CITIZEN_ROUTES[mainSegment] || 'home');
 
-  // Handle unknown paths by redirecting to /
+  // Explicit route guard for disabled rental benchmark routes:
+  // Guarantees that direct navigation to existing or legacy rental routes is strictly blocked and redirected
+  const DISABLED_RENTAL_ROUTES = [
+    'rentals',
+    'rental',
+    'rental-benchmark',
+    'residential-benchmark',
+    'residential',
+    'rent',
+    'rent-rates',
+    'property-benchmark',
+  ];
+
+  // Handle unknown paths and disabled rental routes by redirecting to /
   useEffect(() => {
-    if (!isMerchantPortal && mainSegment !== '' && !VALID_CITIZEN_ROUTES[mainSegment]) {
-      navigate('/', { replace: true });
+    if (!isMerchantPortal && mainSegment !== '') {
+      const isKnownRoute = Boolean(VALID_CITIZEN_ROUTES[mainSegment]);
+      const isDisabledRentalRoute =
+        !FEATURE_FLAGS.ENABLE_RESIDENTIAL_RENTAL_BENCHMARK &&
+        DISABLED_RENTAL_ROUTES.includes(mainSegment);
+
+      if (!isKnownRoute || isDisabledRentalRoute) {
+        navigate('/', { replace: true });
+      }
     }
   }, [isMerchantPortal, mainSegment, navigate]);
 
@@ -314,41 +361,100 @@ export function App() {
     }
   };
 
-  // Real-World Blinkit / Swiggy / Uber Style Location State (persisted & auto-geocoded)
-  const LOCATION_STORAGE_KEY = 'myarea24_user_current_location';
-  const [currentLocation, setCurrentLocation] = useState<UserLocation>(() => {
-    try {
-      const stored = localStorage.getItem(LOCATION_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed && (parsed.areaName || parsed.label) && parsed.coords) {
-          return parsed;
-        }
-      }
-    } catch {
-      // fallback
-    }
-    return INITIAL_FALLBACK_LOCATION;
-  });
-  const [locationModalOpen, setLocationModalOpen] = useState(false);
+  // 1. Centralized Zustand Stores with Stale-While-Revalidate Caching
+  const {
+    currentLocation,
+    locationModalOpen,
+    setLocation,
+    openLocationModal,
+    closeLocationModal,
+    setLocationModalOpen,
+  } = useLocationStore();
 
+  const {
+    data: liveIntelData,
+    fetchIntelligence,
+    pushCivicAlert,
+  } = useIntelligenceStore();
+
+  const marketplaceStore = useMarketplaceStore();
+
+  const {
+    items: cartItems,
+    isOpen: cartDrawerOpen,
+    addToCart,
+    updateQuantity: handleUpdateCartQuantity,
+    removeItem: handleRemoveCartItem,
+    clearCart: handleClearCart,
+    openCart,
+    closeCart,
+    setCartDrawerOpen,
+  } = useCartStore();
+
+  const { savedEntries, savedIds, toggleSave } = useSavedStore();
+
+  const {
+    modalData,
+    openModal: setModalData,
+    closeModal,
+    reportModalOpen,
+    reportReason,
+    openReportModal,
+    closeReportModal,
+    serviceBookingModalOpen,
+    selectedServiceToBook,
+    openServiceBooking,
+    closeServiceBooking,
+    setServiceBookingModalOpen,
+    authModalOpen,
+    openAuthModal,
+    closeAuthModal,
+    setAuthModalOpen,
+    merchantRegModalOpen,
+    openMerchantRegModal,
+    closeMerchantRegModal,
+    setMerchantRegModalOpen,
+    notificationsOpen,
+    setNotificationsOpen,
+    toggleNotifications,
+    profileMenuOpen,
+    setProfileMenuOpen,
+    toggleProfileMenu,
+    mobileMoreOpen,
+    setMobileMoreOpen,
+  } = useUIStore();
+
+  // Automatic caching and background revalidation for /api/v1/weather
   useEffect(() => {
-    if (currentLocation && currentLocation.id !== 'loc-unselected') {
-      try {
-        localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(currentLocation));
-      } catch {
-        // ignore
-      }
+    fetchIntelligence(currentLocation);
+  }, [currentLocation, fetchIntelligence]);
+
+  // Fallback if data is still initializing
+  const fallbackIntel = useLiveIntelligence(currentLocation);
+  const liveIntel = liveIntelData || fallbackIntel;
+
+  // Automatic caching and background revalidation for /api/v1/businesses and /api/v1/products
+  useEffect(() => {
+    if (liveIntel) {
+      marketplaceStore.fetchMarketplace(liveIntel);
     }
-  }, [currentLocation]);
+  }, [liveIntel]);
 
-  // Note: Geolocation is user-initiated via LocationPickerModal ("Use Current Location")
-  // to avoid unsolicited browser permission prompts on initial page load (WCAG & Lighthouse compliance).
-
-  // Unified Live Location Intelligence Engine (FastAPI Backend + Open-Meteo + OpenStreetMap)
-  const liveIntel = useLiveIntelligence(currentLocation);
-  // Live Community & Marketplace Engine (/api/v1/businesses, products, services, offers, events + Overpass POIs)
-  const marketplace = useLiveCommunityMarketplace(liveIntel);
+  const marketplace: LiveCommunityMarketplaceState = {
+    loading: marketplaceStore.loading,
+    businesses: marketplaceStore.businesses,
+    products: marketplaceStore.products,
+    services: marketplaceStore.services,
+    offers: marketplaceStore.offers,
+    events: marketplaceStore.events,
+    emergencyFacilities: marketplaceStore.emergencyFacilities,
+    addBusiness: marketplaceStore.addBusiness,
+    addProduct: marketplaceStore.addProduct,
+    addService: marketplaceStore.addService,
+    addOffer: marketplaceStore.addOffer,
+    addEvent: marketplaceStore.addEvent,
+    refreshMarketplace: marketplaceStore.refreshMarketplace,
+  };
 
   const urlQ = searchParams.get('q') || '';
   const [searchQuery, setSearchQuery] = useState(urlQ);
@@ -364,6 +470,9 @@ export function App() {
     const next = new URLSearchParams(searchParams);
     if (val.trim()) {
       next.set('q', val.trim());
+      if (val.trim().length >= 3) {
+        analytics.trackSearch(val.trim(), mainSegment || 'all');
+      }
     } else {
       next.delete('q');
     }
@@ -371,64 +480,8 @@ export function App() {
   };
 
   const [commandOpen, setCommandOpen] = useState(false);
-
-  // Header Popovers
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-
-  // Interactive Saved State synced with localStorage + FastAPI /api/v1/saved
-  const [savedEntries, setSavedEntries] = useState<SavedEntry[]>(() => {
-    try {
-      const raw = localStorage.getItem(SAVED_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // ignore
-    }
-    return INITIAL_SAVED_ITEMS;
-  });
-  const savedIds = savedEntries.map((s) => s.id);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(savedEntries));
-    } catch {
-      // ignore
-    }
-  }, [savedEntries]);
-
-  // Shopping Cart State synced with localStorage
-  const [cartItems, setCartItems] = useState<CartItem[]>(() => {
-    try {
-      const raw = localStorage.getItem('myarea24_cart_items');
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  });
-  const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
-
-  // Service Booking State
-  const [serviceBookingModalOpen, setServiceBookingModalOpen] = useState(false);
-  const [selectedServiceToBook, setSelectedServiceToBook] = useState<any | null>(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('myarea24_cart_items', JSON.stringify(cartItems));
-    } catch {
-      // ignore
-    }
-  }, [cartItems]);
-
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-
-  // Action Modal State
-  const [modalData, setModalData] = useState<ActionModalData | null>(null);
   const [modalFeedback, setModalFeedback] = useState<'yes' | 'no' | null>(null);
-  const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [reportReason, setReportReason] = useState<string>('');
 
   // Quick AI Assistant Modal State
   const [aiModalPrompt, setAiModalPrompt] = useState<string | null>(null);
@@ -436,7 +489,6 @@ export function App() {
 
   const selectedArea = currentLocation.areaName;
   const [authUser, setAuthUser] = useState<AuthUserProfile | null>(() => getStoredAuthUser());
-  const [authModalOpen, setAuthModalOpen] = useState(false);
 
   // Real-Time WebSockets & Push Notifications State
   const [wsStatus, setWsStatus] = useState<RealtimeConnectionStatus>(() => realtimeService.getStatus());
@@ -457,6 +509,7 @@ export function App() {
     const handleLiveCivicAlert = (e: any) => {
       const alert = e.detail?.alert as LiveAlertItem;
       if (alert) {
+        pushCivicAlert(alert);
         if (alert.severity === 'Critical') {
           setUrgentCivicBanner(alert);
         } else {
@@ -523,9 +576,11 @@ export function App() {
       const q = new URLSearchParams(queryParams).toString();
       if (q) url += `?${q}`;
     }
+    analytics.trackPageView(id, targetPath);
     navigate(url);
     setNotificationsOpen(false);
     setProfileMenuOpen(false);
+    setMobileMoreOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -550,6 +605,17 @@ export function App() {
       }
     }
   }, [mainSegment, subParam, marketplace.products]);
+
+  // Auto-redirect to home when an active dashboard has no valid listings in the current location (only after loading completes)
+  useEffect(() => {
+    if (
+      !marketplace.loading &&
+      ['products', 'services', 'offers'].includes(activeDashboard) &&
+      !isNavVisible(activeDashboard)
+    ) {
+      handleNavigate('home');
+    }
+  }, [activeDashboard, marketplace.loading, marketplace.products.length, marketplace.services.length, marketplace.offers.length]);
 
   // Synchronize local feedback state when viewing any modal item
   useEffect(() => {
@@ -576,111 +642,47 @@ export function App() {
   };
 
   const handleSelectLocation = (loc: UserLocation) => {
-    setCurrentLocation(loc);
-    showToast(`Location updated to ${loc.label} (${loc.areaName}) — syncing live telemetry`);
-  };
-
-  const getEntryItemTypeAndId = (entry: SavedEntry): {
-    itemType: 'business' | 'product' | 'service' | 'offer' | 'bulletin' | 'event';
-    itemId: number;
-  } => {
-    const cat = (entry.category || '').toLowerCase();
-    let itemType: 'business' | 'product' | 'service' | 'offer' | 'bulletin' | 'event' = 'business';
-    if (cat.includes('product') || cat.includes('market')) itemType = 'product';
-    else if (cat.includes('service')) itemType = 'service';
-    else if (cat.includes('offer')) itemType = 'offer';
-    else if (cat.includes('event')) itemType = 'event';
-    else if (cat.includes('bulletin') || cat.includes('alert')) itemType = 'bulletin';
-    else itemType = 'business';
-
-    const numMatch = (entry.id || '').match(/\d+/);
-    const itemId = numMatch ? parseInt(numMatch[0], 10) : 1;
-    return { itemType, itemId };
+    setLocation(loc);
+    showToast(`Location updated to ${loc.label} (${loc.areaName})`);
   };
 
   const handleToggleSave = (entry: SavedEntry) => {
-    const { itemType, itemId } = getEntryItemTypeAndId(entry);
-    setSavedEntries((prev) => {
-      const exists = prev.some((e) => e.id === entry.id);
-      if (exists) {
-        showToast(`Removed "${entry.title}" from Saved`);
-        syncSavedBookmarkToBackend(itemType, itemId);
-        return prev.filter((e) => e.id !== entry.id);
-      } else {
-        showToast(`Saved "${entry.title}" to your favorites!`);
-        syncSavedBookmarkToBackend(itemType, itemId);
-        return [entry, ...prev];
-      }
-    });
+    const wasSaved = savedIds.includes(entry.id);
+    toggleSave(entry);
+    showToast(wasSaved ? `Removed "${entry.title}" from Saved` : `Saved "${entry.title}" to your favorites!`);
   };
 
-  const handleAddToCart = (item: {
-    id?: string;
-    name: string;
-    price: number;
-    oldPrice?: string;
-    image?: string;
-    store?: string;
-    dist?: string;
-    cat?: string;
-  }) => {
-    const id = item.id || `prod_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    setCartItems((prev) => {
-      const existing = prev.find((p) => p.id === id || p.name === item.name);
-      if (existing) {
-        return prev.map((p) => (p.id === existing.id ? { ...p, quantity: p.quantity + 1 } : p));
-      }
-      return [
-        ...prev,
-        {
-          id,
-          name: item.name,
-          price: item.price,
-          oldPrice: item.oldPrice,
-          image: item.image,
-          store: item.store || 'Apna Super Mart',
-          dist: item.dist || '650m',
-          quantity: 1,
-          cat: item.cat || 'Everyday Essentials',
-        },
-      ];
-    });
-    showToast(`Added ${item.name} (₹${item.price}) to cart!`);
-  };
-
-  const handleUpdateCartQuantity = (id: string, delta: number) => {
-    setCartItems((prev) =>
-      prev
-        .map((p) => (p.id === id ? { ...p, quantity: p.quantity + delta } : p))
-        .filter((p) => p.quantity > 0)
-    );
-  };
-
-  const handleRemoveCartItem = (id: string) => {
-    setCartItems((prev) => prev.filter((p) => p.id !== id));
-  };
-
-  const handleClearCart = () => {
-    setCartItems([]);
+  const handleAddToCart = (item: any) => {
+    const success = addToCart(item);
+    if (success) {
+      showToast(`Added ${item.name || item.title || 'Product'} to cart!`);
+    }
   };
 
   const handleBookService = (service: any) => {
-    setSelectedServiceToBook(service);
-    setServiceBookingModalOpen(true);
+    openServiceBooking(service);
   };
 
   const handleAskAi = async (prompt: string) => {
     setAiModalPrompt(prompt);
-    setAiModalReply(`Synthesizing live weather, CPCB AQI, and road corridor telemetry for ${selectedArea}...`);
-    const res = await askLiveAiAssistant(prompt, liveIntel);
-    const fullText = [
-      res.responseText,
-      res.recommendations.length > 0 ? `\nRecommendations:\n• ${res.recommendations.join('\n• ')}` : '',
-      res.sources.length > 0 ? `\n[Sources: ${res.sources.join(' • ')}]` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
-    setAiModalReply(fullText);
+    setAiModalReply('');
+    let accText = '';
+    await streamLiveAiAssistant(prompt, liveIntel, {
+      onChunk: (acc) => {
+        accText = acc;
+        setAiModalReply(acc);
+      },
+      onDone: (res) => {
+        const fullText = [
+          res.responseText,
+          res.recommendations.length > 0 ? `\nRecommendations:\n• ${res.recommendations.join('\n• ')}` : '',
+          res.sources.length > 0 ? `\n[Sources: ${res.sources.join(' • ')}]` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+        setAiModalReply(fullText);
+      },
+    });
   };
 
   const currentNav = NAV_ITEMS.find((n) => n.id === activeDashboard) || NAV_ITEMS[0];
@@ -703,20 +705,37 @@ export function App() {
     onOpenMerchantRegistration: () => setMerchantRegModalOpen(true),
   };
 
-  const renderDesktopDashboard = () => {
+  const isNavVisible = (navId: string) => {
+    if (navId === 'products') return (marketplace.products || []).length > 0;
+    if (navId === 'services') return (marketplace.services || []).length > 0;
+    if (navId === 'offers') return (marketplace.offers || []).length > 0;
+    if (navId === 'events') return false;
+    return true;
+  };
+
+  const renderActiveDashboard = () => {
     switch (activeDashboard) {
       case 'home':
         return <HomeDashboard {...commonProps} />;
       case 'businesses':
         return <BusinessesDashboard {...commonProps} />;
       case 'products':
+        if (!marketplace.loading && !isNavVisible('products')) {
+          return <HomeDashboard {...commonProps} />;
+        }
         return <ProductsDashboard {...commonProps} />;
       case 'services':
+        if (!marketplace.loading && !isNavVisible('services')) {
+          return <HomeDashboard {...commonProps} />;
+        }
         return <ServicesDashboard {...commonProps} />;
       case 'offers':
+        if (!marketplace.loading && !isNavVisible('offers')) {
+          return <HomeDashboard {...commonProps} />;
+        }
         return <OffersDashboard {...commonProps} />;
       case 'events':
-        return <EventsDashboard {...commonProps} />;
+        return <HomeDashboard {...commonProps} />;
       case 'intelligence':
         return <IntelligenceDashboard {...commonProps} />;
       case 'weather':
@@ -769,20 +788,20 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F3F5FB] text-slate-900 flex flex-col">
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col font-sans">
       {/* URGENT CIVIC EMERGENCY BANNER (NDMA SACHET / FLASH FLOOD WARNING) */}
       {urgentCivicBanner && (
-        <div className="bg-gradient-to-r from-rose-700 via-rose-600 to-red-700 text-white px-4 py-2.5 shadow-lg flex items-center justify-between sticky top-0 z-50 animate-in slide-in-from-top-4 duration-200">
+        <div className="bg-gradient-to-r from-rose-700 via-rose-600 to-red-700 text-white px-4 py-2.5 shadow-sm flex items-center justify-between sticky top-0 z-50 animate-in slide-in-from-top-4 duration-200">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center shrink-0 animate-bounce">
-              <AlertTriangle className="w-5 h-5 text-amber-300 fill-amber-300" />
+            <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-4 h-4 text-amber-300 fill-amber-300" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="px-2 py-0.2 rounded-full bg-white/25 text-[10px] font-black uppercase tracking-wider">
+                <span className="px-2 py-0.5 rounded bg-white/20 text-[10px] font-bold uppercase tracking-wider">
                   {urgentCivicBanner.sender || 'NDMA SACHET'}
                 </span>
-                <p className="text-xs font-black tracking-tight truncate">{urgentCivicBanner.title}</p>
+                <p className="text-xs font-bold tracking-tight truncate">{urgentCivicBanner.title}</p>
               </div>
               <p className="text-[11px] text-white/90 line-clamp-1 mt-0.5">{urgentCivicBanner.description}</p>
             </div>
@@ -794,14 +813,14 @@ export function App() {
                 handleNavigate('alerts');
                 setUrgentCivicBanner(null);
               }}
-              className="px-3 py-1 rounded-lg bg-white text-rose-700 hover:bg-rose-50 text-xs font-extrabold transition cursor-pointer shadow-xs"
+              className="px-3 py-1 rounded-md bg-white text-rose-700 hover:bg-rose-50 text-xs font-bold transition cursor-pointer shadow-xs"
             >
               View Advisory →
             </button>
             <button
               type="button"
               onClick={() => setUrgentCivicBanner(null)}
-              className="p-1 rounded-lg hover:bg-white/20 text-white/80 transition cursor-pointer"
+              className="p-1 rounded-md hover:bg-white/20 text-white/80 transition cursor-pointer"
               title="Dismiss Alert"
             >
               <X className="w-4 h-4" />
@@ -811,77 +830,33 @@ export function App() {
       )}
 
       {/* =====================================================================
-          1. PHONE APP UI (< lg) — Conditionally rendered only on mobile viewports!
-          Uses the dedicated MobileAppView with fixed 5-button footer
-          (Home, Map, Explore, Alerts, More) & Blinkit/Uber Location Selector.
-          ===================================================================== */}
-      {!isDesktop && (
-        <div className="flex-1 flex flex-col">
-          <ErrorBoundary
-            level="dashboard"
-            fallbackTitle="Mobile App Interface Notice"
-            onReset={() => handleNavigate('home')}
-          >
-            <React.Suspense fallback={<MobileLoadingSkeleton />}>
-              <MobileAppView
-                activeDashboard={activeDashboard}
-                onNavigate={handleNavigate}
-                onOpenModal={setModalData}
-                onAskAi={handleAskAi}
-                savedIds={savedIds}
-                savedEntries={savedEntries}
-                onToggleSave={handleToggleSave}
-                selectedArea={selectedArea}
-                currentLocation={currentLocation}
-                liveIntel={liveIntel}
-                marketplace={marketplace}
-                onOpenLocationPicker={() => setLocationModalOpen(true)}
-                onOpenNotifications={() => {
-                  setNotificationsOpen((v) => !v);
-                  setProfileMenuOpen(false);
-                }}
-                onOpenProfile={() => {
-                  setProfileMenuOpen((v) => !v);
-                  setNotificationsOpen(false);
-                }}
-                onSwitchToMerchant={handleSwitchToMerchant}
-                onAddToCart={handleAddToCart}
-                onBookService={handleBookService}
-                onOpenCart={() => setCartDrawerOpen(true)}
-                cartCount={cartItems.reduce((acc, it) => acc + it.quantity, 0)}
-              />
-            </React.Suspense>
-          </ErrorBoundary>
-        </div>
-      )}
-
-      {/* =====================================================================
-          2. DESKTOP WEBSITE UI (>= lg) — Left Sidebar + Top Header + Main Body
+          RESPONSIVE UNIFIED SHELL (Mobile + Tablet + Desktop)
+          Left Sidebar (hidden on < lg) + Responsive Top Header + Unified Main Body
+          + Fixed Mobile Bottom Nav (< lg)
          ===================================================================== */}
-      {isDesktop && (
-        <div className="flex flex-1 min-h-0">
-        {/* LEFT SIDEBAR (Exact 235px Desktop Navigation) */}
-        <aside className="w-[235px] shrink-0 bg-white border-r border-slate-200/80 flex flex-col justify-between select-none sticky top-0 h-screen">
+      <div className="flex flex-1 min-h-0">
+        {/* LEFT SIDEBAR (Desktop Navigation >= lg) */}
+        <aside className="hidden lg:flex w-[235px] shrink-0 bg-white border-r border-slate-200/80 flex-col justify-between select-none sticky top-0 h-screen">
           <div className="p-3.5 overflow-y-auto no-scrollbar">
             {/* Brand Logo */}
             <div className="flex items-center justify-between px-2 pt-1 pb-4">
               <button
                 type="button"
                 onClick={() => handleNavigate('home')}
-                className="flex items-center gap-2 text-left cursor-pointer"
+                className="flex items-center gap-2.5 text-left cursor-pointer"
               >
-                <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-sm">
+                <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-xs">
                   <Sparkles className="w-4 h-4" />
                 </div>
-                <span className="text-[19px] font-extrabold tracking-tight text-[#1E1B4B]">
-                  MyArea<span className="text-[#4F46E5]">24</span>
+                <span className="text-lg font-bold tracking-tight text-slate-900">
+                  MyArea<span className="text-blue-600">24</span>
                 </span>
               </button>
             </div>
 
             {/* MAIN SECTION */}
             <nav className="space-y-0.5">
-              {NAV_ITEMS.filter((i) => i.section === 'main').map((item) => {
+              {NAV_ITEMS.filter((i) => i.section === 'main' && isNavVisible(i.id)).map((item) => {
                 const Icon = ICON_MAP[item.id];
                 const active = activeDashboard === item.id;
                 return (
@@ -889,14 +864,14 @@ export function App() {
                     key={item.id}
                     type="button"
                     onClick={() => handleNavigate(item.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition cursor-pointer ${
                       active
-                        ? 'bg-[#EEF2FF] text-[#4F46E5] font-bold shadow-2xs'
+                        ? 'bg-blue-50 text-blue-700 font-semibold'
                         : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                     }`}
                   >
-                    <Icon className={`w-4 h-4 ${active ? 'text-[#4F46E5]' : 'text-slate-500'}`} />
-                    <span>{item.label}</span>
+                    <Icon className={`w-4 h-4 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
+                    <span>{getNavLabel(item.id, item.label)}</span>
                   </button>
                 );
               })}
@@ -904,7 +879,7 @@ export function App() {
 
             {/* INTELLIGENCE SECTION */}
             <div className="mt-4 pt-3 border-t border-slate-100">
-              <p className="px-3 mb-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+              <p className="px-3 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 INTELLIGENCE
               </p>
               <nav className="space-y-0.5">
@@ -919,18 +894,18 @@ export function App() {
                       key={item.id}
                       type="button"
                       onClick={() => handleNavigate(item.id)}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition cursor-pointer ${
                         active
-                          ? 'bg-[#EEF2FF] text-[#4F46E5] font-bold'
+                          ? 'bg-blue-50 text-blue-700 font-semibold'
                           : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                       }`}
                     >
                       <span className="flex items-center gap-3">
-                        <Icon className={`w-4 h-4 ${active ? 'text-[#4F46E5]' : 'text-slate-500'}`} />
-                        <span>{item.label}</span>
+                        <Icon className={`w-4 h-4 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
+                        <span>{getNavLabel(item.id, item.label)}</span>
                       </span>
                       {item.badge && (
-                        <span className="px-1.5 py-0.2 rounded-full bg-rose-100 text-rose-600 text-[10px] font-extrabold">
+                        <span className="px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600 text-[10px] font-bold">
                           {item.id === 'alerts' ? liveIntel.alerts.length : item.badge}
                         </span>
                       )}
@@ -942,7 +917,7 @@ export function App() {
 
             {/* COMMUNITY SECTION */}
             <div className="mt-4 pt-3 border-t border-slate-100">
-              <p className="px-3 mb-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+              <p className="px-3 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 COMMUNITY
               </p>
               <nav className="space-y-0.5">
@@ -956,18 +931,18 @@ export function App() {
                       key={item.id}
                       type="button"
                       onClick={() => handleNavigate(item.id)}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition cursor-pointer ${
                         active
-                          ? 'bg-[#EEF2FF] text-[#4F46E5] font-bold'
+                          ? 'bg-blue-50 text-blue-700 font-semibold'
                           : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                       }`}
                     >
                       <span className="flex items-center gap-3">
-                        <Icon className={`w-4 h-4 ${active ? 'text-[#4F46E5]' : 'text-slate-500'}`} />
-                        <span>{item.label}</span>
+                        <Icon className={`w-4 h-4 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
+                        <span>{getNavLabel(item.id, item.label)}</span>
                       </span>
                       {item.id === 'saved' && (
-                        <span className="px-1.5 py-0.2 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-bold">
+                        <span className="px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 text-[10px] font-semibold">
                           {savedEntries.length}
                         </span>
                       )}
@@ -978,66 +953,168 @@ export function App() {
             </div>
           </div>
 
-          {/* Upgrade to Pro Card at Bottom of Sidebar */}
-          <div className="p-3.5">
+          {/* Merchant Partner Onboarding Card at Bottom of Sidebar */}
+          <div className="p-3">
             <div
-              onClick={() =>
-                setModalData({
-                  title: 'Upgrade to MyArea24 Pro',
-                  subtitle: 'Hyperlocal Intelligence + Merchant Demand Engine',
-                  category: 'Pro Membership',
-                  price: '₹199 / month',
-                  description:
-                    'Unlock real-time multi-signal demand forecasting, priority civic SMS alerts, ad-free CCTV corridor streams, and unlimited AI Assistant queries.',
-                  primaryActionLabel: 'Start 14-Day Free Trial',
-                })
-              }
-              className="cursor-pointer rounded-2xl bg-gradient-to-r from-[#EEF2FF] via-[#F3E8FF] to-[#E0E7FF] p-3 border border-indigo-200/60 flex items-center justify-between gap-2 hover:shadow-sm transition"
+              onClick={handleSwitchToMerchant}
+              className="cursor-pointer rounded-xl bg-slate-50 hover:bg-blue-50/50 p-3 border border-slate-200 hover:border-blue-200 transition group"
             >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-white text-purple-600 flex items-center justify-center shadow-xs shrink-0">
-                  <Crown className="w-4 h-4 fill-purple-600" />
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs shrink-0">
+                  <Store className="w-3.5 h-3.5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-extrabold text-slate-900 truncate">Upgrade to Pro</p>
-                  <p className="text-[10px] text-slate-500 leading-tight">
-                    Smarter insights,
-                    <br />
-                    more features.
+                  <p className="text-xs font-semibold text-slate-900 truncate">Own a Shop?</p>
+                  <p className="text-[10px] text-slate-500 truncate">
+                    List your local store
                   </p>
                 </div>
               </div>
-              <div className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center shrink-0">
-                <ArrowRight className="w-3.5 h-3.5" />
+              <div className="mt-2 flex items-center justify-between text-[11px] font-semibold text-blue-600 pt-2 border-t border-slate-200/60">
+                <span>Merchant Hub</span>
+                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition" />
               </div>
             </div>
           </div>
         </aside>
 
-        {/* RIGHT MAIN AREA (Desktop Header + Dashboard Content) */}
+        {/* RIGHT MAIN AREA (Mobile Header + Desktop Header + Dashboard Content) */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* DESKTOP TOP HEADER BAR */}
-          <header className="h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-6 flex items-center justify-between gap-4 sticky top-0 z-30">
-            {/* Left: Blinkit / Uber Style Location Selector + Global Search */}
-            <div className="flex items-center gap-4 flex-1 max-w-3xl">
-              {/* Blinkit / Swiggy / Uber Style Location Trigger */}
+          {/* MOBILE TOP HEADER BAR (< lg) */}
+          <header className="lg:hidden bg-white/95 backdrop-blur-md text-slate-900 border-b border-slate-200/80 px-3.5 pt-2.5 pb-2.5 sticky top-0 z-30 shadow-xs">
+            <div className="flex items-center justify-between mb-2">
+              <button
+                type="button"
+                onClick={() => handleNavigate('home')}
+                className="cursor-pointer flex items-center gap-2 text-left"
+              >
+                <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center shadow-xs text-white">
+                  <Sparkles className="w-3.5 h-3.5" />
+                </div>
+                <span className="text-base font-bold tracking-tight text-slate-900">
+                  MyArea<span className="text-blue-600">24</span>
+                </span>
+              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('weather')}
+                  className="px-2 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition border border-slate-200/60"
+                >
+                  <Sun className="w-3 h-3 text-amber-500 fill-amber-500" /> {liveIntel.weather.temperatureC}°C
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCartDrawerOpen(true)}
+                  className="relative px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1 transition cursor-pointer text-xs font-semibold shadow-xs"
+                  title="View Cart"
+                >
+                  <ShoppingBag className="w-3.5 h-3.5" />
+                  {cartItems.length > 0 && (
+                    <span className="text-[11px] font-bold">
+                      {cartItems.reduce((acc, it) => acc + it.quantity, 0)}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  aria-label="View neighborhood notifications"
+                  onClick={() => {
+                    setNotificationsOpen((v) => !v);
+                    setProfileMenuOpen(false);
+                  }}
+                  className="relative w-7 h-7 rounded-md bg-slate-100 hover:bg-slate-200 border border-slate-200/60 text-slate-600 flex items-center justify-center cursor-pointer transition"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  {liveIntel.alerts.length > 0 && (
+                    <span className="w-2 h-2 rounded-full bg-rose-500 absolute top-1 right-1" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  aria-label="User account and profile menu"
+                  onClick={() => {
+                    setProfileMenuOpen((v) => !v);
+                    setNotificationsOpen(false);
+                  }}
+                  className="w-7 h-7 rounded-md bg-blue-600 text-white text-xs font-bold flex items-center justify-center cursor-pointer shadow-xs"
+                >
+                  {localStorage.getItem('myarea24_user_avatar_emoji') || (authUser?.fullName || 'User').charAt(0).toUpperCase()}
+                </button>
+              </div>
+            </div>
+
+            {/* Location Selector Pill */}
+            <button
+              type="button"
+              onClick={() => setLocationModalOpen(true)}
+              className="w-full mb-2 px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center justify-between gap-2 text-left transition cursor-pointer"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs font-semibold text-slate-900">{currentLocation.label}</span>
+                    <span className="text-[11px] font-medium text-slate-500 truncate">
+                      • {currentLocation.areaName}
+                    </span>
+                    <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
+                  </div>
+                  <p className="text-[10px] text-slate-500 truncate">
+                    {currentLocation.fullAddress}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-semibold text-slate-600 shrink-0">
+                Change
+              </span>
+            </button>
+
+            {/* Search Bar */}
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 bg-slate-100/80 text-slate-800 rounded-lg px-3 py-1.5 flex items-center gap-2 border border-slate-200/80 focus-within:border-blue-500 focus-within:bg-white transition">
+                <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  placeholder={currentNav.searchPlaceholder}
+                  className="bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none w-full"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileMoreOpen(true)}
+                className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center border border-slate-200 shrink-0 cursor-pointer transition"
+                title="All Categories & Sections"
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+            </div>
+          </header>
+
+          {/* DESKTOP TOP HEADER BAR (>= lg) */}
+          <header className="hidden lg:flex h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-6 items-center justify-between gap-4 sticky top-0 z-30">
+            {/* Left: Location Selector + Global Search */}
+            <div className="flex items-center gap-3.5 flex-1 max-w-3xl">
+              {/* Location Selector Trigger */}
               <button
                 type="button"
                 onClick={() => setLocationModalOpen(true)}
-                className="group flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-[#F4F6FB] hover:bg-indigo-50/70 border border-slate-200/90 hover:border-indigo-200 transition text-left shrink-0 max-w-[265px] cursor-pointer"
+                className="group flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 transition text-left shrink-0 max-w-[270px] cursor-pointer"
               >
-                <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs group-hover:scale-105 transition">
-                  <MapPin className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-md bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                  <MapPin className="w-3.5 h-3.5" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1">
-                    <span className="text-xs font-extrabold text-slate-900">
+                    <span className="text-xs font-semibold text-slate-900 truncate">
                       {currentLocation.label}
                     </span>
-                    <span className="text-[11px] font-bold text-indigo-600 truncate">
+                    <span className="text-[11px] font-medium text-slate-500 truncate">
                       • {currentLocation.areaName}
                     </span>
-                    <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0 group-hover:text-indigo-600 transition" />
+                    <ChevronDown className="w-3 h-3 text-slate-400 shrink-0 group-hover:text-blue-600 transition" />
                   </div>
                   <p className="text-[10px] text-slate-500 truncate">
                     {currentLocation.fullAddress}
@@ -1048,19 +1125,19 @@ export function App() {
               {/* Global Search Box */}
               <div
                 onClick={() => setCommandOpen(true)}
-                className="cursor-pointer flex-1 bg-[#F4F6FB] hover:bg-slate-100/90 border border-slate-200/80 rounded-full px-4 py-2 flex items-center justify-between gap-2 transition"
+                className="cursor-pointer flex-1 bg-slate-50 hover:bg-slate-100/80 border border-slate-200 rounded-lg px-3.5 py-1.5 flex items-center justify-between gap-2 transition focus-within:border-blue-500 focus-within:bg-white"
               >
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                  <Search className="w-4 h-4 text-slate-400 shrink-0" />
+                  <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => handleSearchChange(e.target.value)}
                     placeholder={currentNav.searchPlaceholder}
-                    className="bg-transparent text-xs text-slate-700 placeholder:text-slate-400 focus:outline-none w-full"
+                    className="bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none w-full"
                   />
                 </div>
-                <span className="px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-semibold text-slate-400 shrink-0">
+                <span className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-medium text-slate-400 shrink-0">
                   ⌘ K
                 </span>
               </div>
@@ -1068,59 +1145,35 @@ export function App() {
 
             {/* Right Header Pills */}
             <div className="flex items-center gap-2.5 shrink-0">
-
               {/* Live Weather + AQI Pill */}
               <button
                 type="button"
                 onClick={() => handleNavigate('weather')}
-                className="px-3 py-1.5 rounded-full bg-[#F4F6FB] hover:bg-amber-50 border border-slate-200/80 text-xs font-bold text-slate-700 flex items-center gap-1.5 transition cursor-pointer"
+                className="px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-medium text-slate-700 flex items-center gap-1.5 transition cursor-pointer"
                 title="View Live Local Weather & AQI"
               >
-                <Sun className="w-4 h-4 text-amber-400 fill-amber-400" />
+                <Sun className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
                 <span>{liveIntel.weather.temperatureC}°C</span>
                 <span
-                  className={`text-[10px] font-semibold ${liveIntel.airQuality.colorText} ${liveIntel.airQuality.colorBg} px-1.5 py-0.2 rounded-full`}
+                  className={`text-[10px] font-semibold ${liveIntel.airQuality.colorText} ${liveIntel.airQuality.colorBg} px-1.5 py-0.5 rounded`}
                 >
                   AQI {liveIntel.airQuality.aqiValue}
                 </span>
               </button>
 
-              {/* Real-Time WebSocket Connection Indicator */}
-              <div
-                className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-50 border border-slate-200/80 text-[11px] font-bold text-slate-600 select-none"
-                title={
-                  wsStatus === 'connected'
-                    ? 'Real-Time WebSockets Connected (Instant Civic & Lead Push Active)'
-                    : `WebSocket Status: ${wsStatus}`
-                }
-              >
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    wsStatus === 'connected'
-                      ? 'bg-emerald-500 animate-pulse'
-                      : wsStatus === 'connecting' || wsStatus === 'reconnecting'
-                      ? 'bg-amber-400 animate-bounce'
-                      : 'bg-slate-400'
-                  }`}
-                />
-                <span className="text-[10px] tracking-wide font-extrabold uppercase text-slate-500">
-                  {wsStatus === 'connected' ? 'Live WS' : wsStatus}
-                </span>
-              </div>
-
-              {/* Cart Button with Count Badge */}
+              {/* Cart Button */}
               <button
                 type="button"
                 aria-label="View Local Shopping Cart and Checkout"
                 onClick={() => setCartDrawerOpen(true)}
-                className="relative px-3 py-1.5 rounded-full bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-xs"
+                className="relative px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-xs active:scale-95"
                 title="View Local Shopping Cart & Checkout"
               >
-                <ShoppingBag className="w-4 h-4 text-blue-600" />
+                <ShoppingBag className="w-3.5 h-3.5 text-white" />
                 <span>Cart</span>
                 {cartItems.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full bg-blue-600 text-white text-[10px] font-black">
-                    {cartItems.reduce((acc, it) => acc + it.quantity, 0)}
+                  <span className="px-1.5 py-0.5 rounded bg-white text-emerald-800 text-[10px] font-bold shadow-xs">
+                    {cartItems.reduce((acc, it) => acc + it.quantity, 0)} • ₹{cartItems.reduce((acc, it) => acc + it.price * it.quantity, 0)}
                   </span>
                 )}
               </button>
@@ -1133,11 +1186,13 @@ export function App() {
                   setNotificationsOpen((v) => !v);
                   setProfileMenuOpen(false);
                 }}
-                className="relative w-9 h-9 rounded-full bg-[#F4F6FB] hover:bg-rose-50 border border-slate-200/80 flex items-center justify-center text-slate-700 transition cursor-pointer"
+                className="relative w-8 h-8 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-600 transition cursor-pointer"
                 title="Live Neighbourhood Notifications"
               >
-                <Bell className="w-4 h-4" />
-                <span className="w-2 h-2 rounded-full bg-rose-500 absolute top-2 right-2 ring-2 ring-white" />
+                <Bell className="w-3.5 h-3.5" />
+                {liveIntel.alerts.length > 0 && (
+                  <span className="w-2 h-2 rounded-full bg-rose-500 absolute top-1.5 right-1.5" />
+                )}
               </button>
 
               {/* User Profile Pill */}
@@ -1149,27 +1204,27 @@ export function App() {
                   setProfileMenuOpen((v) => !v);
                   setNotificationsOpen(false);
                 }}
-                className="pl-1.5 pr-3 py-1 rounded-full bg-[#F4F6FB] hover:bg-slate-100 border border-slate-200/80 flex items-center gap-2 transition cursor-pointer"
+                className="pl-1.5 pr-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center gap-2 transition cursor-pointer"
                 title={authUser ? `Logged in as ${authUser.fullName}` : 'Sign In / Account Profile'}
               >
-                <span className="w-7 h-7 rounded-full bg-indigo-600 text-white text-xs font-extrabold flex items-center justify-center">
-                  {(authUser?.fullName || 'User').charAt(0).toUpperCase()}
+                <span className="w-6 h-6 rounded-md bg-blue-600 text-white text-xs font-bold flex items-center justify-center">
+                  {localStorage.getItem('myarea24_user_avatar_emoji') || (authUser?.fullName || 'User').charAt(0).toUpperCase()}
                 </span>
                 <div className="text-left hidden xl:block">
-                  <p className="text-xs font-bold text-slate-800 leading-none">
-                    {authUser ? authUser.fullName : 'Sign In / Account'}
+                  <p className="text-xs font-semibold text-slate-800 leading-none">
+                    {authUser ? authUser.fullName : 'Sign In'}
                   </p>
-                  <p className="text-[10px] text-slate-500 mt-0.5">
-                    {authUser ? authUser.email : currentLocation.areaName}
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    {authUser ? authUser.email : 'Account'}
                   </p>
                 </div>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                <ChevronDown className="w-3 h-3 text-slate-400" />
               </button>
             </div>
           </header>
 
-          {/* DESKTOP MAIN CONTENT BODY */}
-          <main className="flex-1 p-5 pb-8 overflow-y-auto">
+          {/* UNIFIED MAIN CONTENT BODY (Mobile + Desktop) */}
+          <main className="flex-1 px-3.5 py-4 pb-24 lg:p-5 lg:pb-8 overflow-y-auto">
             <div className="max-w-[1320px] mx-auto">
               <ErrorBoundary
                 level="dashboard"
@@ -1177,14 +1232,316 @@ export function App() {
                 onReset={() => handleNavigate('home')}
               >
                 <React.Suspense fallback={<DashboardLoadingSkeleton />}>
-                  {renderDesktopDashboard()}
+                  {renderActiveDashboard()}
                 </React.Suspense>
               </ErrorBoundary>
+
+              {/* INDIAN COMMERCE & CONSUMER PROTECTION 2020 COMPLIANCE FOOTER */}
+              <ComplianceFooter />
             </div>
           </main>
         </div>
       </div>
-    )}
+
+      {/* =====================================================================
+          MOBILE BOTTOM NAVIGATION BAR (< lg)
+          Fixed 6-button bar: Home | Map | Stores | Alerts | Orders | More
+         ===================================================================== */}
+      <nav
+        aria-label="Mobile bottom navigation"
+        className="lg:hidden fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200/90 shadow-[0_-4px_20px_rgba(15,23,42,0.06)] px-2 py-1.5 z-40"
+      >
+        <div className="grid grid-cols-6 items-center max-w-md mx-auto">
+          {/* 1. Home */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMoreOpen(false);
+              handleNavigate('home');
+            }}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              activeDashboard === 'home' && !mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <Home
+              className={`w-5 h-5 ${
+                activeDashboard === 'home' && !mobileMoreOpen ? 'stroke-[2.5]' : 'stroke-[1.8]'
+              }`}
+            />
+            <span className="text-[10px] leading-tight">Home</span>
+          </button>
+
+          {/* 2. Map */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMoreOpen(false);
+              handleNavigate('map');
+            }}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              activeDashboard === 'map' && !mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <MapPin
+              className={`w-5 h-5 ${
+                activeDashboard === 'map' && !mobileMoreOpen ? 'stroke-[2.5]' : 'stroke-[1.8]'
+              }`}
+            />
+            <span className="text-[10px] leading-tight">Map</span>
+          </button>
+
+          {/* 3. Stores / Explore */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMoreOpen(false);
+              handleNavigate('businesses');
+            }}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              ['businesses', 'products', 'services', 'offers', 'events'].includes(activeDashboard) && !mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <Store
+              className={`w-5 h-5 ${
+                ['businesses', 'products', 'services', 'offers', 'events'].includes(activeDashboard) && !mobileMoreOpen
+                  ? 'stroke-[2.5]'
+                  : 'stroke-[1.8]'
+              }`}
+            />
+            <span className="text-[10px] leading-tight">Stores</span>
+          </button>
+
+          {/* 4. Alerts */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMoreOpen(false);
+              handleNavigate('alerts');
+            }}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              activeDashboard === 'alerts' && !mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <div className="relative">
+              <Bell
+                className={`w-5 h-5 ${
+                  activeDashboard === 'alerts' && !mobileMoreOpen ? 'stroke-[2.5]' : 'stroke-[1.8]'
+                }`}
+              />
+              {liveIntel.alerts.length > 0 && (
+                <span className="w-2 h-2 rounded-full bg-rose-500 absolute -top-0.5 -right-0.5 ring-2 ring-white" />
+              )}
+            </div>
+            <span className="text-[10px] leading-tight">Alerts</span>
+          </button>
+
+          {/* 5. Orders */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMoreOpen(false);
+              handleNavigate('my-orders');
+            }}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              activeDashboard === 'my-orders' && !mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <ShoppingBag
+              className={`w-5 h-5 ${
+                activeDashboard === 'my-orders' && !mobileMoreOpen ? 'stroke-[2.5]' : 'stroke-[1.8]'
+              }`}
+            />
+            <span className="text-[10px] leading-tight">Orders</span>
+          </button>
+
+          {/* 6. More */}
+          <button
+            type="button"
+            onClick={() => setMobileMoreOpen((v) => !v)}
+            className={`flex flex-col items-center justify-center py-1 gap-0.5 transition cursor-pointer ${
+              mobileMoreOpen
+                ? 'text-[#2563EB] font-extrabold'
+                : 'text-slate-500 hover:text-slate-800 font-medium'
+            }`}
+          >
+            <LayoutGrid
+              className={`w-5 h-5 ${
+                mobileMoreOpen ? 'stroke-[2.5]' : 'stroke-[1.8]'
+              }`}
+            />
+            <span className="text-[10px] leading-tight">More</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* =====================================================================
+          MOBILE "MORE" CATEGORIZED DRAWER (< lg)
+         ===================================================================== */}
+      {mobileMoreOpen && (
+        <div
+          onClick={() => setMobileMoreOpen(false)}
+          className="lg:hidden fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 flex flex-col justify-end"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-t-3xl p-4 max-h-[82vh] overflow-y-auto pb-10 animate-in slide-in-from-bottom-5 duration-200"
+          >
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                  <LayoutGrid className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">All Sections & Tools</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Local discovery, intelligence & community navigation
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Close navigation menu drawer"
+                onClick={() => setMobileMoreOpen(false)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Switch to Merchant Mode Banner */}
+            <div
+              onClick={() => {
+                setMobileMoreOpen(false);
+                handleSwitchToMerchant();
+              }}
+              className="mb-4 p-3 rounded-2xl bg-gradient-to-r from-purple-900 via-indigo-900 to-slate-900 text-white flex items-center justify-between shadow-sm border border-purple-800/60 cursor-pointer active:scale-98 transition"
+            >
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-400/30 flex items-center justify-center text-purple-300 shrink-0">
+                  <Store className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-extrabold text-white">Merchant Business Portal</h4>
+                  <p className="text-[10px] text-purple-200">Manage store orders, catalog & leads</p>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-extrabold shrink-0 shadow-xs">
+                Switch ›
+              </span>
+            </div>
+
+            <div className="space-y-4">
+              {/* Explore & Commerce */}
+              <div>
+                <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-2 px-1">
+                  Explore & Local Commerce
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {NAV_ITEMS.filter((i) => i.section === 'main' && i.id !== 'home' && isNavVisible(i.id)).map((item) => {
+                    const Icon = ICON_MAP[item.id] || Store;
+                    const active = activeDashboard === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          handleNavigate(item.id);
+                          setMobileMoreOpen(false);
+                        }}
+                        className={`p-2.5 rounded-2xl border flex flex-col items-center text-center gap-1.5 transition cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold'
+                            : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-indigo-50'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4" />
+                        <span className="text-[11px] font-bold leading-tight">{getNavLabel(item.id, item.label)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Intelligence & AI */}
+              <div>
+                <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-2 px-1">
+                  Neighbourhood Intelligence & AI
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {NAV_ITEMS.filter((i) => i.section === 'intelligence').map((item) => {
+                    const Icon = ICON_MAP[item.id] || Zap;
+                    const active = activeDashboard === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          handleNavigate(item.id);
+                          setMobileMoreOpen(false);
+                        }}
+                        className={`p-2.5 rounded-2xl border flex flex-col items-center text-center gap-1.5 transition relative cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold'
+                            : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-indigo-50'
+                        }`}
+                      >
+                        {item.badge && (
+                          <span className="absolute top-1.5 right-1.5 px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[8px] font-extrabold">
+                            {item.id === 'alerts' ? liveIntel.alerts.length : item.badge}
+                          </span>
+                        )}
+                        <Icon className="w-4 h-4" />
+                        <span className="text-[11px] font-bold leading-tight">{getNavLabel(item.id, item.label)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Community & Emergency */}
+              <div>
+                <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-2 px-1">
+                  Community, Rates & Utilities
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {NAV_ITEMS.filter((i) => i.section === 'community').map((item) => {
+                    const Icon = ICON_MAP[item.id] || FileText;
+                    const active = activeDashboard === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          handleNavigate(item.id);
+                          setMobileMoreOpen(false);
+                        }}
+                        className={`p-2.5 rounded-2xl border flex flex-col items-center text-center gap-1.5 transition cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold'
+                            : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-indigo-50'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4" />
+                        <span className="text-[11px] font-bold leading-tight">{getNavLabel(item.id, item.label)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* =====================================================================
           NOTIFICATIONS POPOVER (Bell Icon Click on Desktop or Mobile)
@@ -1256,72 +1613,47 @@ export function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="bg-white rounded-2xl shadow-2xl border border-slate-200/90 w-72 overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            className="bg-white rounded-xl shadow-xl border border-slate-200 w-72 overflow-hidden animate-in fade-in zoom-in-95 duration-150"
           >
             <div
               onClick={() => {
                 setProfileMenuOpen(false);
                 setAuthModalOpen(true);
               }}
-              className="p-4 bg-gradient-to-r from-[#0B1739] to-[#27206A] text-white flex items-center gap-3 cursor-pointer hover:opacity-95 transition"
+              className="p-3.5 bg-slate-900 text-white flex items-center gap-3 cursor-pointer hover:bg-slate-800 transition"
               title="Click to manage account profile"
             >
-              <div className="w-10 h-10 rounded-full bg-indigo-500 border-2 border-white/40 flex items-center justify-center font-extrabold text-sm">
-                {(authUser?.fullName || 'User').charAt(0).toUpperCase()}
+              <div className="w-9 h-9 rounded-full bg-blue-600 border border-white/20 flex items-center justify-center font-bold text-xs">
+                {localStorage.getItem('myarea24_user_avatar_emoji') || (authUser?.fullName || 'User').charAt(0).toUpperCase()}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <p className="text-xs font-extrabold truncate">
+                  <p className="text-xs font-semibold truncate">
                     {authUser ? authUser.fullName : 'Welcome, Guest'}
                   </p>
-                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/30 text-emerald-300 text-[9px] font-bold">
+                  <span className="px-1.5 py-0.2 rounded bg-white/20 text-white text-[9px] font-medium">
                     {authUser ? (authUser.role === 'merchant' ? 'Merchant' : 'Citizen') : 'Visitor'}
                   </span>
                 </div>
-                <p className="text-[10px] text-blue-200 truncate">
-                  {authUser ? `✓ ${authUser.email}` : `Click to sign in via Email OTP`}
+                <p className="text-[10px] text-slate-300 truncate">
+                  {authUser ? authUser.email : 'Click to sign in via Email OTP'}
                 </p>
               </div>
             </div>
-            <div className="p-2 space-y-0.5 text-xs">
+            <div className="p-1.5 space-y-0.5 text-xs">
               <button
                 type="button"
                 onClick={() => {
                   setProfileMenuOpen(false);
                   setAuthModalOpen(true);
                 }}
-                className="w-full px-3 py-2 rounded-xl hover:bg-indigo-50 flex items-center justify-between font-semibold text-indigo-700 cursor-pointer"
+                className="w-full px-3 py-2 rounded-lg hover:bg-slate-100 flex items-center justify-between font-medium text-slate-700 cursor-pointer transition"
               >
                 <span className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />{' '}
+                  <CheckCircle2 className="w-4 h-4 text-blue-600" />{' '}
                   {authUser ? 'Account & Profile Settings' : 'Sign In / Register via OTP'}
                 </span>
-                <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setProfileMenuOpen(false);
-                  setLocationModalOpen(true);
-                }}
-                className="w-full px-3 py-2 rounded-xl hover:bg-slate-50 flex items-center justify-between font-semibold text-slate-700"
-              >
-                <span className="flex items-center gap-2">
-                  <MapPin className="w-4 h-4 text-indigo-600" /> Manage Saved Addresses
-                </span>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-              <button
-                type="button"
-                onClick={() => handleNavigate('saved')}
-                className="w-full px-3 py-2 rounded-xl hover:bg-slate-50 flex items-center justify-between font-semibold text-slate-700"
-              >
-                <span className="flex items-center gap-2">
-                  <Heart className="w-4 h-4 text-rose-500" /> Saved Places & Deals
-                </span>
-                <span className="px-1.5 py-0.2 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-bold">
-                  {savedEntries.length}
-                </span>
               </button>
               <button
                 type="button"
@@ -1454,7 +1786,8 @@ export function App() {
               <div className="grid grid-cols-2 gap-1">
                 {NAV_ITEMS.filter(
                   (item) =>
-                    !searchQuery || item.label.toLowerCase().includes(searchQuery.toLowerCase())
+                    isNavVisible(item.id) &&
+                    (!searchQuery || item.label.toLowerCase().includes(searchQuery.toLowerCase()))
                 ).map((item) => {
                   const Icon = ICON_MAP[item.id];
                   return (
@@ -1498,9 +1831,9 @@ export function App() {
                 <div>
                   <div className="flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5 text-blue-300" />
-                    <h3 className="text-sm font-extrabold">MyArea24 Synthesis Core</h3>
+                    <h3 className="text-sm font-extrabold">MyArea24 Local Insights</h3>
                   </div>
-                  <p className="text-[11px] text-blue-200">Cross-Signal Correlation • {selectedArea}</p>
+                  <p className="text-[11px] text-blue-200">Neighborhood Overview • {selectedArea}</p>
                 </div>
               </div>
               <button
@@ -1893,6 +2226,9 @@ export function App() {
         )}
       </React.Suspense>
 
+      {/* MULTI-STORE CART CONFLICT RESOLUTION MODAL */}
+      <CartConflictModal />
+
       {/* SLIDE-OUT CART DRAWER WITH LIVE ORDER LIFECYCLE */}
       <React.Suspense fallback={null}>
         {cartDrawerOpen && (
@@ -1941,6 +2277,14 @@ export function App() {
           />
         )}
       </React.Suspense>
+
+      {/* DPDP ACT 2023 CONSENT BANNER & STATUTORY PREFERENCES */}
+      <LocationPermissionPrompt
+        onLocationResolved={handleSelectLocation}
+        onOpenManualSelector={() => setLocationModalOpen(true)}
+      />
+      <NotificationPermissionPrompt />
+      <DPDPConsentBanner />
     </div>
   );
 }

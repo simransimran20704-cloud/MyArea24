@@ -12,11 +12,11 @@ from sqlalchemy.orm import Session
 def random_digits(k: int = 4) -> str:
     return "".join(random.choices("0123456789", k=k))
 
-from backend.app.api.deps import get_current_user
+from backend.app.api.deps import get_current_user, get_current_user_optional
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
 from backend.app.core.websocket_manager import ws_manager
-from backend.app.database.models import GovernmentNotice, CustomerEnquiry, Business, User
+from backend.app.database.models import GovernmentNotice, CustomerEnquiry, Business, User, Order
 from backend.app.database.session import get_db
 
 router = APIRouter(tags=["Real-Time WebSockets & Push Notifications"])
@@ -450,10 +450,67 @@ async def trigger_merchant_order(req: TriggerOrderRequest):
 
 
 @router.post("/api/v1/ws/trigger-order-status")
-async def trigger_order_status(req: TriggerOrderStatusRequest):
+async def trigger_order_status(
+    req: TriggerOrderStatusRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Broadcasts a real-time order lifecycle stage update to the customer and merchant.
+    Strictly enforces authorization:
+      - Only merchants or delivery partners/admins can advance fulfillment status ('confirmed', 'out_for_delivery', 'delivered').
+      - Customers can only trigger status updates if cancelling an order that is still in 'placed' status.
     """
+    order = db.query(Order).filter(Order.order_number == req.order_number).first()
+    if order:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to modify order lifecycle status.",
+            )
+
+        is_admin = current_user.role == "admin"
+        is_merchant = False
+        if order.business_id:
+            biz = db.query(Business).filter(Business.id == order.business_id).first()
+            if biz and biz.owner_id == current_user.id:
+                is_merchant = True
+
+        is_customer = (
+            order.user_id == current_user.id
+            or (current_user.phone and order.customer_phone and current_user.phone.endswith(order.customer_phone[-10:]))
+        )
+
+        if not (is_admin or is_merchant or is_customer):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: You do not have permission to modify this order.",
+            )
+
+        # Customer can only cancel
+        if is_customer and not (is_admin or is_merchant):
+            if req.status != "cancelled":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Customers cannot advance fulfillment stages. Only merchants can accept and deliver orders.",
+                )
+            if order.status != "placed":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot cancel order: Order is already in progress or completed.",
+                )
+
+        # Sync database order record
+        order.status = req.status
+        if req.payment_status:
+            order.payment_status = req.payment_status
+        elif req.status == "delivered" and order.payment_method == "cod":
+            order.payment_status = "paid"
+        if req.notes:
+            order.notes = req.notes
+        order.updated_at = datetime.datetime.utcnow()
+        db.commit()
+
     update_data = {
         "type": "ORDER_STATUS_UPDATE",
         "order_number": req.order_number,

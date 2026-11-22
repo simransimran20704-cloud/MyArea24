@@ -6,8 +6,8 @@ export const NAV_ITEMS: NavItem[] = [
     id: 'home',
     label: 'Home',
     section: 'main',
-    searchPlaceholder: 'Search for places, services, events or ask anything...',
-    appSearchPlaceholder: 'Search for places, services, events...',
+    searchPlaceholder: 'Search for places, services, offers or ask anything...',
+    appSearchPlaceholder: 'Search for places, services, stores...',
   },
   {
     id: 'businesses',
@@ -37,13 +37,6 @@ export const NAV_ITEMS: NavItem[] = [
     searchPlaceholder: 'Search for offers (e.g. restaurant discounts, salon deals, gym offers...)',
     appSearchPlaceholder: 'Search for offers (e.g. restaurant, salon, gym...)',
   },
-  {
-    id: 'events',
-    label: 'Events',
-    section: 'main',
-    searchPlaceholder: 'Search for events (e.g. concerts, workshops, exhibitions...)',
-    appSearchPlaceholder: 'Search events (e.g. music, art, food, workshops...)',
-  },
   // Intelligence section (Zero overlap: Decision Engine, Unified Weather & AQI, Live Traffic, Alerts & Civic Notices, AI Assistant)
   {
     id: 'intelligence',
@@ -54,7 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'weather',
-    label: 'Weather & AQI',
+    label: 'Weather & Air Quality',
     section: 'intelligence',
     searchPlaceholder: 'Search live forecast, rain radar, CPCB AQI, PM2.5 & health advice...',
     appSearchPlaceholder: 'Search weather, rain chance, CPCB AQI...',
@@ -93,7 +86,7 @@ export const NAV_ITEMS: NavItem[] = [
     id: 'market-rates',
     label: 'Market & Fuel Rates',
     section: 'community',
-    searchPlaceholder: 'Search mandi vegetables, petrol, diesel, CNG, gold or rent rates...',
+    searchPlaceholder: 'Search mandi vegetables, petrol, diesel, CNG or gold rates...',
     appSearchPlaceholder: 'Search vegetables, petrol, CNG, groceries...',
   },
   {

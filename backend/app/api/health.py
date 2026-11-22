@@ -89,9 +89,9 @@ def get_system_mesh_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "active_districts_indexed": districts_count,
         "spatial_indexing_engine": "2D-KDTree (O(log N) Nearest-Neighbor Lat/Lon)",
         "providers": {
-            "weather": "OPERATIONAL (WeatherAPI Forecast Telemetry)",
-            "traffic": "OPERATIONAL (TomTom Arterial Friction)",
-            "air_quality": "OPERATIONAL (OpenAQ Ambient Indexing)",
+            "weather": "OPERATIONAL (National Meteorological Grid)",
+            "traffic": "OPERATIONAL (Live Traffic Network)",
+            "air_quality": "OPERATIONAL (CPCB CAAQMS Network)",
             "disaster_cap": "OPERATIONAL (NDMA SACHET RSS/CAP Feeds)",
             "emergency_sos": "OPERATIONAL (112, 108, 1033, 1078, 1070, 1554 Speed Dials)",
         },

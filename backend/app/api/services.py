@@ -39,6 +39,7 @@ def list_services(
     category: Optional[str] = Query(None, description="Category filter (e.g. Electrician, Plumber, AC Repair)"),
     locality: Optional[str] = Query(None, description="Locality filter"),
     city: Optional[str] = Query(None, description="City filter"),
+    pincode: Optional[str] = Query(None, description="Pincode filter"),
     q: Optional[str] = Query(None, description="Search keyword"),
     sort_by: Optional[str] = Query("distance", description="distance | rating | price_asc | price_desc"),
     user_lat: Optional[float] = Query(None),
@@ -47,6 +48,18 @@ def list_services(
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
+    # Normalize parameter types for direct python & test call resilience
+    category = category if isinstance(category, str) else None
+    locality = locality if isinstance(locality, str) else None
+    city = city if isinstance(city, str) else None
+    pincode = pincode if isinstance(pincode, str) else None
+    q = q if isinstance(q, str) else None
+    sort_by = sort_by if isinstance(sort_by, str) else "distance"
+    user_lat = float(user_lat) if isinstance(user_lat, (int, float)) else None
+    user_lon = float(user_lon) if isinstance(user_lon, (int, float)) else None
+    page = page if isinstance(page, int) and page >= 1 else 1
+    page_size = page_size if isinstance(page_size, int) and page_size >= 1 else 20
+
     # Resolve coordinates and canonical city/locality across all 780+ Indian districts
     target_loc = (city or locality or "").strip()
     disp_city = (city or "").strip()
@@ -106,41 +119,73 @@ def list_services(
     if category:
         query = query.filter(func.lower(ServiceListing.category) == category.strip().lower())
 
-    # Multi-token locality + city + proximity matching (so 'Delhi Connaught Place' matches 'Connaught Place')
-    tokens = extract_locality_tokens(locality or disp_locality, city or disp_city)
-    word_tokens: List[str] = []
-    for tok in tokens:
-        word_tokens.append(tok)
-        for w in tok.replace("/", " ").replace("-", " ").split():
-            if len(w.strip()) >= 3 and w.strip().lower() not in {"sector", "phase", "block", "nagar", "colony", "market", "area"}:
-                word_tokens.append(w.strip())
+    # Strict hyperlocal locality + proximity matching (<= 6.0 km or matching neighborhood locality tokens)
+    loc_tokens = extract_locality_tokens(locality or disp_locality, city or disp_city)
+    broad_regions = {"delhi", "new delhi", "mumbai", "india", "local area", "all", "select your area (india)"}
+    token_clauses = []
+    for tok in loc_tokens:
+        if len(tok) >= 3 and tok.lower() not in broad_regions:
+            token_clauses.append(func.lower(ServiceListing.locality).like(f"%{tok.lower()}%"))
+            token_clauses.append(func.lower(ServiceListing.service_area).like(f"%{tok.lower()}%"))
 
-    if word_tokens or (user_lat is not None and user_lon is not None):
-        loc_filters = []
-        for tok in set(word_tokens):
-            pattern = f"%{tok.lower()}%"
-            loc_filters.append(func.lower(ServiceListing.locality).like(pattern))
-            loc_filters.append(func.lower(ServiceListing.city).like(pattern))
-            loc_filters.append(func.lower(ServiceListing.service_area).like(pattern))
-        if user_lat is not None and user_lon is not None:
-            loc_filters.append(
-                (ServiceListing.latitude - user_lat) * (ServiceListing.latitude - user_lat)
-                + (ServiceListing.longitude - user_lon) * (ServiceListing.longitude - user_lon)
-                <= 0.06
-            )
-        if loc_filters:
-            query = query.filter(or_(*loc_filters))
+    if user_lat is not None and user_lon is not None:
+        rad_lat = math.radians(user_lat)
+        cos_lat = math.cos(rad_lat)
+        cos_lat_sq = cos_lat * cos_lat
+        dist_expr = (
+            (ServiceListing.latitude - user_lat) * (ServiceListing.latitude - user_lat)
+            + (ServiceListing.longitude - user_lon) * (ServiceListing.longitude - user_lon) * cos_lat_sq
+        )
+        if token_clauses:
+            query = query.filter(or_(dist_expr <= 0.0035, *token_clauses))
+        else:
+            query = query.filter(dist_expr <= 0.0035)
+    elif token_clauses:
+        query = query.filter(or_(*token_clauses))
 
-    if q:
-        term = f"%{q.strip().lower()}%"
+    if pincode and pincode.strip():
+        pin_term = f"%{pincode.strip()}%"
         query = query.filter(
             or_(
-                func.lower(ServiceListing.provider_name).like(term),
-                func.lower(ServiceListing.category).like(term),
-                func.lower(ServiceListing.service_area).like(term),
-                func.lower(ServiceListing.description).like(term),
+                ServiceListing.service_area.like(pin_term),
+                ServiceListing.locality.like(pin_term),
             )
         )
+
+    if q:
+        cleaned_q = q.strip().lower()
+        term = f"%{cleaned_q}%"
+        is_postgres = False
+        try:
+            bind = db.get_bind()
+            if bind and bind.dialect.name == "postgresql":
+                is_postgres = True
+        except Exception:
+            pass
+
+        if is_postgres:
+            ts_query = func.plainto_tsquery('english', cleaned_q)
+            ts_vector = func.to_tsvector(
+                'english',
+                func.concat_ws(' ', ServiceListing.provider_name, ServiceListing.category, ServiceListing.service_area, ServiceListing.description)
+            )
+            fts_condition = ts_vector.op('@@')(ts_query)
+            query = query.filter(
+                or_(
+                    fts_condition,
+                    func.lower(ServiceListing.provider_name).like(term),
+                    func.lower(ServiceListing.category).like(term),
+                )
+            )
+        else:
+            query = query.filter(
+                or_(
+                    func.lower(ServiceListing.provider_name).like(term),
+                    func.lower(ServiceListing.category).like(term),
+                    func.lower(ServiceListing.service_area).like(term),
+                    func.lower(ServiceListing.description).like(term),
+                )
+            )
 
     # SQL Ordering
     dist_expr = None
@@ -169,29 +214,8 @@ def list_services(
     # Direct SQL total count calculation
     total = query.count()
 
-    # Resilient fallback if a specific locality filter produced 0 matches: synthesize on-demand first
-    if total == 0 and (locality or city) and not q:
-        if user_lat is not None and user_lon is not None:
-            try:
-                sync_live_services(db, user_lat, user_lon, disp_city or city, disp_locality or locality)
-            except Exception:
-                pass
-        fallback_q = db.query(ServiceListing).filter(ServiceListing.is_available == True)
-        if category:
-            fallback_q = fallback_q.filter(func.lower(ServiceListing.category) == category.strip().lower())
-        if user_lat is not None and user_lon is not None:
-            fallback_q = fallback_q.filter(
-                (ServiceListing.latitude - user_lat) * (ServiceListing.latitude - user_lat)
-                + (ServiceListing.longitude - user_lon) * (ServiceListing.longitude - user_lon)
-                <= 0.12
-            )
-        fallback_q = _apply_sort(fallback_q)
-        total = fallback_q.count()
-        start = (page - 1) * page_size
-        paged_svcs = fallback_q.offset(start).limit(page_size).all()
-    else:
-        start = (page - 1) * page_size
-        paged_svcs = query.offset(start).limit(page_size).all()
+    start = (page - 1) * page_size
+    paged_svcs = query.offset(start).limit(page_size).all()
 
     items = []
     for s in paged_svcs:

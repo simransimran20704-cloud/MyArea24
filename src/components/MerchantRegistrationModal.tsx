@@ -22,6 +22,8 @@ import {
   MerchantRegistrationProfile,
   saveMerchantRegistration,
   verifyMerchantCredentials,
+  registerMerchantOnBackend,
+  getStoredMerchantAccounts,
   CUSTOM_BIZ_KEY,
   loadLocalList,
   saveLocalList,
@@ -67,8 +69,24 @@ export function MerchantRegistrationModal({
   const [pincode, setPincode] = useState('');
 
   const [ownerName, setOwnerName] = useState('');
-  const [phone, setPhone] = useState('+91 ');
-  const [whatsapp, setWhatsapp] = useState('+91 ');
+  const [phone, setPhone] = useState('');
+  const [whatsapp, setWhatsapp] = useState('');
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 2 * 1024 * 1024) {
+        setErrorMsg('Store logo image must be less than 2MB.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setLogoUrl(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
   const [email, setEmail] = useState('');
   const [storePin, setStorePin] = useState('');
   const [storePinConfirm, setStorePinConfirm] = useState('');
@@ -97,7 +115,17 @@ export function MerchantRegistrationModal({
     'Event Venues & Hall Bookings',
   ];
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleQuickDemoLogin = () => {
+    const accounts = getStoredMerchantAccounts();
+    if (accounts.length > 0 && (accounts[0].phone || accounts[0].email)) {
+      setLoginIdentifier(accounts[0].phone || accounts[0].email);
+      setLoginError(null);
+    } else {
+      setLoginError('No saved merchant profile found. Please enter your store phone/email and PIN, or register a new storefront below.');
+    }
+  };
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
 
@@ -111,9 +139,8 @@ export function MerchantRegistrationModal({
     }
 
     setIsLoggingIn(true);
-    setTimeout(() => {
-      const result = verifyMerchantCredentials(loginIdentifier, loginPin);
-      setIsLoggingIn(false);
+    try {
+      const result = await verifyMerchantCredentials(loginIdentifier, loginPin);
       if (result.success && result.profile) {
         onSuccess(result.profile);
         onClose();
@@ -122,7 +149,11 @@ export function MerchantRegistrationModal({
           result.error || 'Invalid store credentials. Check your phone number / PIN or register below.'
         );
       }
-    }, 600);
+    } catch (err: any) {
+      setLoginError(err.message || 'Login failed. Please check your connection.');
+    } finally {
+      setIsLoggingIn(false);
+    }
   };
 
   const handleNextStep = () => {
@@ -199,8 +230,9 @@ export function MerchantRegistrationModal({
       const baseLat = coords?.lat ?? 28.6139;
       const baseLng = coords?.lng ?? 77.2090;
 
+      const rawPin = storePin.trim();
       const profile: MerchantRegistrationProfile = {
-        id: `biz_${bizName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${Date.now().toString(36)}`,
+        logoUrl: logoUrl || undefined,
         businessName: bizName.trim(),
         category: bizCat,
         ownerName: ownerName.trim(),
@@ -215,55 +247,61 @@ export function MerchantRegistrationModal({
         docNumber: docNumber.trim().toUpperCase(),
         openingTime,
         closingTime,
-        storePin: storePin.trim(),
         isVerified: true,
         registeredAt: new Date().toISOString(),
       };
 
-      // 1. Save merchant registration state & accounts
-      saveMerchantRegistration(profile);
+      // 1. Persist to backend database (with cryptographic PIN hash) and retrieve session
+      registerMerchantOnBackend(profile, rawPin).then((res) => {
+        if (!res.success && res.error) {
+          setIsVerifying(false);
+          setErrorMsg(res.error);
+          return;
+        }
+        const persisted = res.profile || profile;
 
-      // 2. Add as a live verified business in the local community directory
-      const newBiz: LiveBusinessItem = {
-        id: `merchant-biz-${Date.now()}`,
-        slug: bizName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-        name: profile.businessName,
-        cat: bizCat.split('&')[0].trim(),
-        sub: `${bizCat} • ${locality}`,
-        description: `Verified merchant storefront owned by ${profile.ownerName}. Direct neighborhood service with zero commission.`,
-        address: profile.fullAddress,
-        locality,
-        city,
-        rating: '4.9',
-        reviews: '(Newly Verified)',
-        dist: '0.2 km',
-        distanceKm: 0.2,
-        status: 'Open',
-        closes: `Closes ${closingTime}`,
-        openingTime,
-        closingTime,
-        phone: profile.phone,
-        whatsapp: profile.whatsapp,
-        img: './assets/crops/biz-card-chai.webp',
-        verified: true,
-        trending: true,
-        popular: true,
-        lat: baseLat,
-        lng: baseLng,
-        activeProductsCount: 0,
-        activeOffersCount: 0,
-        source: 'Merchant Self-Verified Onboarding',
-      };
+        // 2. Add as a live verified business in the local community directory
+        const newBiz: LiveBusinessItem = {
+          id: persisted.id || `merchant-biz-${Date.now()}`,
+          slug: bizName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          name: persisted.businessName,
+          cat: bizCat.split('&')[0].trim(),
+          sub: `${bizCat} • ${locality}`,
+          description: `Verified merchant storefront owned by ${persisted.ownerName}. Direct neighborhood service with zero commission.`,
+          address: persisted.fullAddress,
+          locality,
+          city,
+          rating: '4.9',
+          reviews: '(Newly Verified)',
+          dist: '0.2 km',
+          distanceKm: 0.2,
+          status: 'Open',
+          closes: `Closes ${closingTime}`,
+          openingTime,
+          closingTime,
+          phone: persisted.phone,
+          whatsapp: persisted.whatsapp,
+          img: './assets/crops/biz-card-chai.webp',
+          verified: true,
+          trending: true,
+          popular: true,
+          lat: baseLat,
+          lng: baseLng,
+          activeProductsCount: 0,
+          activeOffersCount: 0,
+          source: 'Merchant Self-Verified Onboarding',
+        };
 
-      const existingBiz = loadLocalList<LiveBusinessItem>(CUSTOM_BIZ_KEY);
-      const filtered = existingBiz.filter(
-        (b) => b.name.toLowerCase() !== newBiz.name.toLowerCase()
-      );
-      saveLocalList(CUSTOM_BIZ_KEY, [newBiz, ...filtered]);
+        const existingBiz = loadLocalList<LiveBusinessItem>(CUSTOM_BIZ_KEY);
+        const filtered = existingBiz.filter(
+          (b) => b.name.toLowerCase() !== newBiz.name.toLowerCase()
+        );
+        saveLocalList(CUSTOM_BIZ_KEY, [newBiz, ...filtered]);
 
-      setIsVerifying(false);
-      onSuccess(profile);
-      onClose();
+        setIsVerifying(false);
+        onSuccess(persisted);
+        onClose();
+      });
     }, 2800);
   };
 
@@ -437,7 +475,17 @@ export function MerchantRegistrationModal({
                 </p>
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 space-y-2">
+                <button
+                  type="button"
+                  onClick={handleQuickDemoLogin}
+                  disabled={isLoggingIn}
+                  className="w-full py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>⚡ Autofill Registered Account</span>
+                </button>
+
                 <button
                   type="submit"
                   disabled={isLoggingIn}
@@ -503,6 +551,44 @@ export function MerchantRegistrationModal({
                   {step === 1 && (
                     <div className="space-y-3.5">
                       <div>
+                        {/* Store Logo Upload */}
+                        <div>
+                          <label className="block font-bold text-slate-700 mb-1">
+                            Store Logo / Brand Emblem (Optional)
+                          </label>
+                          <div className="flex items-center gap-3">
+                            {logoUrl ? (
+                              <div className="relative w-14 h-14 rounded-2xl overflow-hidden border-2 border-indigo-500 shadow-sm">
+                                <img src={logoUrl} alt="Store Logo Preview" className="w-full h-full object-cover" />
+                                <button
+                                  type="button"
+                                  onClick={() => setLogoUrl(null)}
+                                  className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-rose-600 text-white flex items-center justify-center text-[10px]"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="w-14 h-14 rounded-2xl bg-slate-100 border-2 border-dashed border-slate-300 flex items-center justify-center text-slate-400">
+                                <Store className="w-6 h-6" />
+                              </div>
+                            )}
+                            <div className="flex-1">
+                              <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 text-xs font-bold transition cursor-pointer">
+                                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                                <span>{logoUrl ? 'Change Logo Image' : 'Attach / Upload Store Logo'}</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={handleLogoUpload}
+                                />
+                              </label>
+                              <p className="text-[10px] text-slate-400 mt-0.5">PNG, JPG or WEBP under 2MB</p>
+                            </div>
+                          </div>
+                        </div>
+
                         <label className="block font-bold text-slate-700 mb-1">
                           Business / Storefront Name <span className="text-rose-500">*</span>
                         </label>
@@ -594,28 +680,42 @@ export function MerchantRegistrationModal({
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="block font-bold text-slate-700 mb-1">
-                            Primary Calling Number <span className="text-rose-500">*</span>
+                            Primary 10-Digit Mobile <span className="text-rose-500">*</span>
                           </label>
-                          <input
-                            type="text"
-                            required
-                            placeholder="+91 98110 24024"
-                            value={phone}
-                            onChange={(e) => setPhone(e.target.value)}
-                            className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-medium focus:outline-none focus:border-indigo-600 focus:bg-white"
-                          />
+                          <div className="relative flex items-center">
+                            <span className="absolute left-2.5 text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                              +91
+                            </span>
+                            <input
+                              type="tel"
+                              required
+                              maxLength={10}
+                              placeholder="9811024024"
+                              value={phone}
+                              onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                              className="w-full pl-14 pr-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-semibold focus:outline-none focus:border-indigo-600 focus:bg-white"
+                            />
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">Strictly 10-digit number</p>
                         </div>
                         <div>
                           <label className="block font-bold text-slate-700 mb-1">
-                            WhatsApp Business Number
+                            WhatsApp Number (10-Digit)
                           </label>
-                          <input
-                            type="text"
-                            placeholder="+91 98110 24024"
-                            value={whatsapp}
-                            onChange={(e) => setWhatsapp(e.target.value)}
-                            className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-medium focus:outline-none focus:border-indigo-600 focus:bg-white"
-                          />
+                          <div className="relative flex items-center">
+                            <span className="absolute left-2.5 text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                              +91
+                            </span>
+                            <input
+                              type="tel"
+                              maxLength={10}
+                              placeholder="9811024024"
+                              value={whatsapp}
+                              onChange={(e) => setWhatsapp(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                              className="w-full pl-14 pr-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-semibold focus:outline-none focus:border-indigo-600 focus:bg-white"
+                            />
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">For order notifications</p>
                         </div>
                       </div>
 

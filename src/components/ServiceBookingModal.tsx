@@ -12,9 +12,12 @@ import {
   Sparkles,
   Wrench,
   AlertCircle,
+  XCircle,
 } from 'lucide-react';
 import { ServiceBooking, ServiceBookingStatus, UserLocation } from '../types';
-import { bookServiceSlot, advanceBookingStatus } from '../services/orderCommerceService';
+import { bookServiceSlot, cancelCustomerBooking } from '../services/orderCommerceService';
+import { getStoredAuthUser } from '../services/authService';
+import { apiClient } from '../config/apiClient';
 
 export interface ServiceData {
   id?: string | number;
@@ -51,18 +54,57 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
   const [activeBooking, setActiveBooking] = useState<ServiceBooking | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
-  // Form State
+  // Form State (Populated dynamically from auth session or saved profile)
   const [selectedDate, setSelectedDate] = useState('Today');
   const [selectedSlot, setSelectedSlot] = useState('Evening (04:00 PM - 06:00 PM)');
-  const [customerName, setCustomerName] = useState('Divyansh Gupta');
-  const [customerPhone, setCustomerPhone] = useState('+91 98765 43210');
-  const [serviceAddress, setServiceAddress] = useState(currentLocation.fullAddress || currentLocation.areaName);
+  const [customerName, setCustomerName] = useState(() => {
+    const authUser = getStoredAuthUser();
+    if (authUser?.fullName) return authUser.fullName;
+    try {
+      const saved = localStorage.getItem('myarea24_checkout_profile');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.recipientName) return parsed.recipientName;
+      }
+    } catch {}
+    return '';
+  });
+
+  const [customerPhone, setCustomerPhone] = useState(() => {
+    const authUser = getStoredAuthUser();
+    if (authUser?.phone) return authUser.phone;
+    try {
+      const saved = localStorage.getItem('myarea24_checkout_profile');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.recipientPhone) return parsed.recipientPhone;
+      }
+    } catch {}
+    return '';
+  });
+
+  const [serviceAddress, setServiceAddress] = useState(
+    currentLocation.fullAddress || currentLocation.areaName || ''
+  );
   const [notes, setNotes] = useState('');
+  const [bookingError, setBookingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const authUser = getStoredAuthUser();
+    if (authUser?.fullName && !customerName) {
+      setCustomerName(authUser.fullName);
+    }
+    if (authUser?.phone && !customerPhone) {
+      setCustomerPhone(authUser.phone);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (currentLocation) {
-      setServiceAddress(currentLocation.fullAddress || currentLocation.areaName);
+      setServiceAddress(currentLocation.fullAddress || currentLocation.areaName || '');
     }
   }, [currentLocation]);
 
@@ -70,6 +112,7 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
     if (!isOpen) {
       setStep('schedule');
       setActiveBooking(null);
+      setBookingError(null);
     }
   }, [isOpen]);
 
@@ -78,10 +121,26 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
   const numericCost = parseFloat(service.price.replace(/[^\d.]/g, '')) || 299;
 
   const handleBookSlot = async () => {
-    if (!customerName || !customerPhone || !serviceAddress) {
-      alert('Please fill in complete contact and address details.');
+    if (!customerName.trim()) {
+      setBookingError('Please enter your full name.');
       return;
     }
+    if (!customerPhone.trim() || customerPhone.trim().replace(/\D/g, '').length < 8) {
+      setBookingError('Please enter a valid mobile number for confirmation.');
+      return;
+    }
+    if (!serviceAddress.trim()) {
+      setBookingError('Please enter the service location address.');
+      return;
+    }
+    setBookingError(null);
+
+    try {
+      localStorage.setItem(
+        'myarea24_checkout_profile',
+        JSON.stringify({ recipientName: customerName, recipientPhone: customerPhone })
+      );
+    } catch {}
 
     setIsSubmitting(true);
     try {
@@ -110,18 +169,29 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
     }
   };
 
-  const handleAdvanceStatus = async () => {
+  const handleCancelBooking = async () => {
     if (!activeBooking) return;
-    const stages: ServiceBookingStatus[] = ['requested', 'confirmed', 'in_progress', 'completed'];
-    const currentIdx = stages.indexOf(activeBooking.status);
-    if (currentIdx < stages.length - 1) {
-      const nextStatus = stages[currentIdx + 1];
-      setIsUpdatingStatus(true);
-      const updated = await advanceBookingStatus(activeBooking.bookingNumber, nextStatus);
-      if (updated) {
-        setActiveBooking({ ...updated });
+    if (activeBooking.status !== 'requested') {
+      alert('Service reservations can only be cancelled while in requested state.');
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to cancel service booking #${activeBooking.bookingNumber}?`)) {
+      return;
+    }
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const res = await cancelCustomerBooking(activeBooking.bookingNumber, 'Cancelled by resident');
+      if (res.success && res.booking) {
+        setActiveBooking({ ...res.booking });
+      } else if (!res.success) {
+        setCancelError(res.error || 'Failed to cancel booking.');
       }
-      setIsUpdatingStatus(false);
+    } catch (e: any) {
+      setCancelError(e.message || 'Error cancelling booking.');
+    } finally {
+      setIsCancelling(false);
     }
   };
 
@@ -240,33 +310,51 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
 
               {/* Customer Contact & Address Form */}
               <div className="space-y-2.5 pt-2 border-t border-slate-100">
+                {bookingError && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{bookingError}</span>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[11px] font-bold text-slate-700">Your Full Name</label>
+                    <label className="text-[11px] font-bold text-slate-700">Your Full Name *</label>
                     <input
                       type="text"
                       value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
+                      onChange={(e) => {
+                        setCustomerName(e.target.value);
+                        if (bookingError) setBookingError(null);
+                      }}
+                      placeholder="e.g. Rahul Sharma"
                       className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500 outline-none mt-1"
                     />
                   </div>
                   <div>
-                    <label className="text-[11px] font-bold text-slate-700">Mobile Number</label>
+                    <label className="text-[11px] font-bold text-slate-700">Mobile Number *</label>
                     <input
                       type="text"
                       value={customerPhone}
-                      onChange={(e) => setCustomerPhone(e.target.value)}
+                      onChange={(e) => {
+                        setCustomerPhone(e.target.value);
+                        if (bookingError) setBookingError(null);
+                      }}
+                      placeholder="e.g. +91 98123 45678"
                       className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500 outline-none mt-1"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="text-[11px] font-bold text-slate-700">Service Location Address</label>
+                  <label className="text-[11px] font-bold text-slate-700">Service Location Address *</label>
                   <textarea
                     rows={2}
                     value={serviceAddress}
-                    onChange={(e) => setServiceAddress(e.target.value)}
+                    onChange={(e) => {
+                      setServiceAddress(e.target.value);
+                      if (bookingError) setBookingError(null);
+                    }}
+                    placeholder="e.g. Flat 301, Sector 9, Main Road"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500 outline-none mt-1 resize-none"
                   />
                 </div>
@@ -374,6 +462,13 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
 
                   {/* Actions & Refresh */}
                   <div className="pt-2 space-y-2">
+                    {cancelError && (
+                      <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                        <span>{cancelError}</span>
+                      </div>
+                    )}
+
                     <button
                       type="button"
                       disabled={isUpdatingStatus}
@@ -381,15 +476,14 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
                         setIsUpdatingStatus(true);
                         try {
                           const otpParam = activeBooking.otpCode ? `?otp=${encodeURIComponent(activeBooking.otpCode)}` : '';
-                          const res = await fetch(`/api/v1/services/bookings/${encodeURIComponent(activeBooking.bookingNumber)}${otpParam}`);
-                          if (res.ok) {
-                            const data = await res.json();
-                            if (data.booking) {
-                              setActiveBooking({
-                                ...activeBooking,
-                                status: data.booking.status,
-                              });
-                            }
+                          const res = await apiClient.get<{ booking?: { status: ServiceBookingStatus } }>(
+                            `/api/v1/services/bookings/${encodeURIComponent(activeBooking.bookingNumber)}${otpParam}`
+                          );
+                          if (res.ok && res.data?.booking) {
+                            setActiveBooking({
+                              ...activeBooking,
+                              status: res.data.booking.status,
+                            });
                           }
                         } catch (e) {
                           console.warn('Failed to refresh booking status', e);
@@ -402,6 +496,34 @@ export const ServiceBookingModal: React.FC<ServiceBookingModalProps> = ({
                       <RefreshCw className={`w-3.5 h-3.5 ${isUpdatingStatus ? 'animate-spin' : ''}`} />
                       Refresh Booking Status
                     </button>
+
+                    {activeBooking.status === 'requested' && (
+                      <button
+                        type="button"
+                        disabled={isCancelling}
+                        onClick={handleCancelBooking}
+                        className="w-full py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        {isCancelling ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                        )}
+                        Cancel Service Reservation
+                      </button>
+                    )}
+
+                    {activeBooking.status !== 'requested' && activeBooking.status !== 'cancelled' && (
+                      <div className="px-3 py-1.5 rounded-xl bg-slate-100 text-[11px] text-slate-500 font-medium text-center border border-slate-200/60">
+                        🔒 Reservation confirmed. Service execution status is managed by the provider.
+                      </div>
+                    )}
+
+                    {activeBooking.status === 'cancelled' && (
+                      <div className="px-3 py-1.5 rounded-xl bg-rose-50 text-[11px] text-rose-700 font-bold text-center border border-rose-200">
+                        Booking has been cancelled.
+                      </div>
+                    )}
 
                     <a
                       href="/my-bookings"

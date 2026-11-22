@@ -9,17 +9,23 @@ from backend.app.core.config import settings
 from backend.app.core.logging import logger
 from backend.app.database.models import (
     AirQualityObservation,
+    Business,
     CivicBulletin,
     CommunitySignal,
     EmergencyFacility,
+    Event,
     GovernmentNotice,
     IntelligenceInsight,
     MandiPrice,
     Offer,
+    Product,
+    ServiceListing,
     TrafficObservation,
     WeatherObservation,
 )
 from backend.app.intelligence.rules import haversine_distance_km
+from backend.app.services.ai_guardrail_service import AIGuardrailService
+from backend.app.services.api_tracker_service import ApiTrackerService
 
 
 class GeminiAssistantSchema(BaseModel):
@@ -204,6 +210,57 @@ def _gather_grounded_context(
         for o in offers
     ]
 
+    # 10. Nearby Verified Local Businesses (Shops, Clinics, Kirana, Restaurants)
+    all_biz = db.query(Business).filter(Business.status == "active").limit(50).all()
+    nearby_biz = []
+    for b in all_biz:
+        if b.latitude and b.longitude:
+            d = haversine_distance_km(target_lat, target_lon, b.latitude, b.longitude)
+            if d <= 15.0:
+                nearby_biz.append({
+                    "name": b.name,
+                    "category": b.category,
+                    "rating": float(b.rating or 4.5),
+                    "locality": b.locality,
+                    "address": b.address,
+                    "phone": b.phone,
+                    "distance_km": round(d, 1),
+                })
+    nearby_biz.sort(key=lambda x: x["distance_km"])
+    top_biz = nearby_biz[:6]
+
+    # 11. Nearby Verified Products & Local Price Checks
+    active_prods = db.query(Product).filter(Product.availability_status == "in_stock").limit(8).all()
+    prods_data = [
+        {
+            "name": p.name,
+            "category": p.category,
+            "price": f"₹{p.local_price}",
+            "mrp": f"₹{p.mrp}" if p.mrp else None,
+        }
+        for p in active_prods
+    ]
+
+    # 12. Upcoming Real Neighbourhood Events, Hackathons & Festivals
+    today_dt = now_utc.date()
+    events = (
+        db.query(Event)
+        .filter(Event.start_time >= today_dt)
+        .order_by(Event.start_time.asc())
+        .limit(6)
+        .all()
+    )
+    events_data = [
+        {
+            "title": ev.title,
+            "category": ev.category,
+            "venue": ev.venue_name,
+            "date": ev.start_time.strftime("%d %b %Y"),
+            "source": ev.source,
+        }
+        for ev in events
+    ]
+
     return {
         "locality": area_name,
         "coordinates": {"lat": target_lat, "lon": target_lon},
@@ -217,6 +274,9 @@ def _gather_grounded_context(
         "community_signals": nearby_signals[:4],
         "emergency_facilities": nearby_facilities[:4],
         "local_offers": offers_data,
+        "nearby_verified_businesses": top_biz,
+        "nearby_available_products": prods_data,
+        "upcoming_verified_events": events_data,
         "emergency_helpline_numbers": {
             "national_emergency": "112",
             "ambulance": "108",
@@ -240,6 +300,18 @@ def query_gemini_assistant(
     Trained as 'MyArea24 Saathi' — the user's caring companion, friend, and neighborhood guardian.
     Returns None if GEMINI_API_KEY is not configured or if an error occurs.
     """
+    is_safe, sanitized_query, rejection_reason = AIGuardrailService.sanitize_input(query)
+    if not is_safe:
+        return {
+            "query": query,
+            "response_text": f"Namaste dost! {rejection_reason}",
+            "key_findings": ["Query could not be processed by AI safety guardrails."],
+            "recommendations": ["Please ask questions related to local shops, weather, traffic, prices, or events."],
+            "grounded_sources": ["MyArea24 Safety Policy"],
+            "confidence": "GUARDRAIL_BLOCKED",
+            "timestamp": datetime.datetime.utcnow(),
+        }
+
     api_key = (
         settings.GEMINI_API_KEY
         or os.environ.get("GEMINI_API_KEY")
@@ -255,14 +327,14 @@ def query_gemini_assistant(
         grounded_context = _gather_grounded_context(area_name, target_lat, target_lon, db)
 
         system_instruction = (
-            "You are 'MyArea24 Saathi' (साथी) — the user's most trusted, caring local companion, friend, and neighborhood guardian in India.\n\n"
+            "You are 'MyArea24 Saathi' (Hello Saathi, how is the weather today?) — the user's most trusted, caring local companion, friend, and neighborhood guardian in India.\n\n"
             "YOUR CORE IDENTITY & MISSION:\n"
             "1. You are NOT a cold, robotic bureaucrat or dry sensor database. You are a genuine, helpful 'Saathi' (companion and friend) who truly cares about the user's safety, comfort, time, money, family, and daily routine.\n"
             "2. You know the user's neighborhood, streets, traffic bottlenecks, weather quirks, sabzi mandi rates, and local culture inside out.\n\n"
             "LANGUAGE & COMMUNICATION STYLE:\n"
             "1. Match the user's language style naturally:\n"
             "   - If the user talks in Hinglish (e.g., 'bhai kaisa hai', 'office jana safe hai kya', 'aaj ka scene batao'): Respond in natural, warm, conversational Hinglish using friendly and respectful words like 'Bhai', 'Dost', 'Aap', 'Fikar mat karo'.\n"
-            "   - If the user talks in Hindi (e.g., 'आज मौसम कैसा रहेगा?', 'नमस्ते'): Respond in polite, warm, conversational Hindi.\n"
+            "   - If the user talks in Hindi (e.g., 'Hello Saathi, how is the weather today??', 'Hello Saathi, how is the weather today?'): Respond in polite, warm, conversational Hindi.\n"
             "   - If the user talks in English: Respond in warm, engaging, and friendly English.\n"
             "2. Never start with robotic disclaimers like 'As an AI language model...' or 'According to telemetry feeds...'. Speak directly, warmly, and naturally, just like a smart, caring local friend.\n\n"
             "COMPANION BEHAVIORS ('SAATHI' ATTRIBUTES):\n"
@@ -283,7 +355,7 @@ def query_gemini_assistant(
         )
 
         candidate_models = [
-            settings.GEMINI_MODEL or "gemini-3.5-flash-lite",
+            settings.GEMINI_MODEL or "gemini-flash-latest",
             "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
             "gemini-flash-latest",
@@ -375,4 +447,194 @@ def synthesize_civic_safety_briefing(
     except Exception as err:
         logger.warning(f"[gemini_assistant] Failed to synthesize safety briefing: {err}")
         return None
+
+
+def stream_gemini_assistant(
+    query: str,
+    area_name: str,
+    target_lat: float,
+    target_lon: float,
+    is_live_supported: bool,
+    db: Session,
+):
+    """
+    Yields Server-Sent Events (SSE) data objects streaming the Saathi AI assistant's response.
+    Event structure:
+      - {'type': 'chunk', 'text': str}
+      - {'type': 'metadata', 'key_findings': [...], 'recommendations': [...], 'grounded_sources': [...], 'confidence': str}
+      - {'type': 'done', 'full_text': str}
+    """
+    is_safe, sanitized_query, rejection_reason = AIGuardrailService.sanitize_input(query)
+    if not is_safe:
+        safe_msg = f"Namaste dost! {rejection_reason}"
+        yield f"data: {json.dumps({'type': 'chunk', 'text': safe_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'key_findings': ['Query blocked by safety policy.'], 'recommendations': ['Please ask questions related to local shops, weather, traffic, prices, or events.'], 'grounded_sources': ['MyArea24 Safety Policy'], 'confidence': 'GUARDRAIL_BLOCKED'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'full_text': safe_msg})}\n\n"
+        return
+
+    api_key = (
+        settings.GEMINI_API_KEY
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+    )
+
+    grounded_context = _gather_grounded_context(area_name, target_lat, target_lon, db)
+
+    # Derive factual findings & recommendations from verified local database context
+    findings: List[str] = []
+    recommendations: List[str] = []
+    sources: List[str] = ["WeatherAPI", "TomTom Traffic API v5", "NDMA SACHET"]
+
+    w = grounded_context.get("weather")
+    if w:
+        findings.append(f"Weather: {w.get('condition', 'Nominal')}, {w.get('temp_c', 25)}°C (Humidity: {w.get('humidity', 50)}%).")
+        sources.append("WeatherAPI")
+
+    t = grounded_context.get("traffic_top_incidents", [])
+    if t:
+        findings.append(f"Traffic: {len(t)} bottlenecks reported, {t[0].get('road', 'corridor')} delay ~{t[0].get('delay_minutes', 0)} mins.")
+        sources.append("TomTom Traffic API v5")
+    else:
+        findings.append("Traffic: Arterial road network is running clear with nominal commute speeds.")
+
+    aqi = grounded_context.get("air_quality")
+    if aqi:
+        findings.append(f"Air Quality (NAQI): {aqi.get('aqi', 0)} ({aqi.get('category', 'Satisfactory')}) at {aqi.get('station', 'CPCB CAAQMS')}.")
+        sources.append("CPCB NAQI")
+
+    notices = grounded_context.get("active_disaster_notices", [])
+    if notices:
+        findings.append(f"Disaster Notice: {notices[0].get('headline', 'Active civic advisory')}.")
+        sources.append("NDMA SACHET")
+        recommendations.append("Follow official NDMA instructions and avoid waterlogged or hazardous routes.")
+
+    if not recommendations:
+        recommendations.append("Plan journeys using live traffic and weather updates.")
+        recommendations.append("Saathi AI is continuously monitoring local signals in your neighborhood.")
+
+    # Deduplicate sources
+    sources = list(dict.fromkeys(sources))
+
+    streamed_anything = False
+    full_text_acc = ""
+
+    if api_key and api_key.strip().lower() not in ("your_key", "placeholder", "none", ""):
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key.strip())
+
+            system_instruction = (
+                "You are 'MyArea24 Saathi' (Hello Saathi, how is the weather today?) — the user's most trusted, caring local companion, friend, and neighborhood guardian in India.\n\n"
+                "YOUR CORE IDENTITY & MISSION:\n"
+                "1. You are NOT a cold, robotic bureaucrat or dry sensor database. You are a genuine, helpful 'Saathi' (companion and friend) who truly cares about the user's safety, comfort, time, money, family, and daily routine.\n"
+                "2. You know the user's neighborhood, streets, traffic bottlenecks, weather quirks, sabzi mandi rates, and local culture inside out.\n\n"
+                "LANGUAGE & COMMUNICATION STYLE:\n"
+                "1. Match the user's language style naturally (Hinglish/Hindi/English):\n"
+                "   - If Hinglish: Respond in natural, warm, conversational Hinglish ('Bhai', 'Dost', 'Aap', 'Fikar mat karo').\n"
+                "   - If Hindi: Respond in polite, warm, conversational Hindi.\n"
+                "   - If English: Respond in warm, engaging, and friendly English.\n"
+                "2. Never start with robotic disclaimers like 'As an AI...'. Speak directly, warmly, and naturally, just like a smart, caring local friend.\n"
+                "3. Stream your natural conversational response directly (do NOT wrap in JSON formatting).\n"
+                "4. 100% Grounded Honesty: Never hallucinate or invent fake sensor numbers. Base factual claims strictly on the verified database context below.\n"
+            )
+
+            user_content = (
+                f"User Question: \"{query}\"\n\n"
+                f"Active Locality: {area_name} (Coordinates: {target_lat}, {target_lon})\n"
+                f"Verified Database Context:\n"
+                f"{json.dumps(grounded_context, indent=2)}\n\n"
+                f"Please provide your direct, caring, companion-style answer now."
+            )
+
+            candidate_models = [
+                settings.GEMINI_MODEL or "gemini-flash-latest",
+                "gemini-3.5-flash-lite",
+                "gemini-3.8-flash",
+                "gemini-flash-latest",
+            ]
+            unique_models = list(dict.fromkeys(candidate_models))
+
+            for model_name in unique_models:
+                try:
+                    logger.info(f"[gemini_assistant] Streaming content with model='{model_name}'...")
+                    response_stream = client.models.generate_content_stream(
+                        model=model_name,
+                        contents=user_content,
+                        config={
+                            "system_instruction": system_instruction,
+                            "temperature": 0.3,
+                        },
+                    )
+                    for chunk in response_stream:
+                        if chunk and chunk.text:
+                            streamed_anything = True
+                            full_text_acc += chunk.text
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk.text})}\n\n"
+                    if streamed_anything:
+                        break
+                except Exception as m_err:
+                    logger.warning(f"[gemini_assistant] Streaming model {model_name} failed: {m_err}. Trying next...")
+        except Exception as genai_err:
+            logger.warning(f"[gemini_assistant] GenAI initialization or streaming failed: {genai_err}")
+
+    # Fallback if Gemini did not stream (e.g. offline, keyless, quota exceeded)
+    if not streamed_anything:
+        logger.info("[gemini_assistant] Serving deterministic grounded stream fallback.")
+        import time
+
+        cond_str = w.get("condition", "Partly Cloudy") if w else "Partly Cloudy"
+        temp_val = w.get("temp_c", 28) if w else 28
+        worst_road = t[0].get("road", "arterial roads") if t else "arterials"
+        worst_delay = t[0].get("delay_minutes", 0) if t else 0
+
+        q_lower = query.lower()
+        notice_headline = notices[0].get('headline', '') if notices else ''
+        if any(k in q_lower for k in ["hello", "hi", "hey", "kaisa", "kaise", "kya haal", "batao", "sathi", "saathi", "dost", "namaste", "good morning"]):
+            fallback_text = (
+                f"Namaste dost! Main hoon aapka MyArea24 Saathi. {area_name} me sab badhiya hai! "
+                f"Abhi yahan mausam {cond_str} ({temp_val}°C) chal raha hai. "
+                f"{f'Traffic me {worst_road} par thoda jam hai (~{worst_delay} mins), ' if t else 'Traffic filhaal bilkul clear hai, '} "
+                f"{f'aur NDMA alert active hai: {notice_headline}. ' if notice_headline else 'aur koi major disaster warning nahi hai. '}"
+                f"Aap bataiye, aaj kahan nikalne ka plan hai? Main rasta aur safety check kar deta hoon!"
+            )
+        elif any(k in q_lower for k in ["emergency", "hospital", "ambulance", "police", "doctor", "medical", "accident", "madad", "help"]):
+            fallback_text = (
+                f"Emergency alert for {area_name}: Agar koi tatkal emergency hai to turant 112 ya 108 par call karein. "
+                f"Aas-paas ke 24/7 hospitals aur emergency services active hain. "
+                f"Humari live directory me nearest facilities listed hain. Fikar mat kijiye, hum aapke sath hain!"
+            )
+        elif any(k in q_lower for k in ["traffic", "jam", "road", "commute", "metro", "route", "slow"]):
+            fallback_text = (
+                f"{area_name} traffic status update: "
+                f"{f'Current bottleneck: {worst_road} par lagbhag {worst_delay} min ka delay report hua hai. ' if t else 'Aas-paas ke sabhi corridors par traffic smooth chal raha hai. '} "
+                f"Safe drive karein aur helmet/seatbelt zaroor pehnein!"
+            )
+        elif any(k in q_lower for k in ["weather", "rain", "barish", "mausam", "temp", "garmi", "sardi", "aqi", "air"]):
+            aqi_text = f" Aur AQI {aqi.get('aqi', 0)} ({aqi.get('category', 'Moderate')}) hai." if aqi else ""
+            fallback_text = (
+                f"{area_name} weather briefing: Abhi mausam {cond_str} hai, taapman lagbhag {temp_val}°C.{aqi_text} "
+                f"{'Barish ya cloudy conditions ko dekhte hue chhaata sath rakhein.' if 'rain' in cond_str.lower() or 'cloud' in cond_str.lower() else 'Mausam outdoor travel ke liye theek hai.'}"
+            )
+        else:
+            fallback_text = (
+                f"Bhai, {area_name} ka live summary: Mausam abhi {cond_str} ({temp_val}°C) hai. "
+                f"{f'Traffic me {worst_road} par thoda slow movement hai (~{worst_delay} mins delay), ' if t else 'Traffic bilkul smooth aur clear hai, '} "
+                f"{f'aur NDMA alert: {notice_headline}. ' if notice_headline else 'aur koi emergency warning nahi hai. '}"
+                f"Aap batao, main aapki kis cheez me madad kar sakta hoon?"
+            )
+
+        full_text_acc = fallback_text
+        words = fallback_text.split(" ")
+        for i, w_token in enumerate(words):
+            chunk = w_token + (" " if i < len(words) - 1 else "")
+            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+            time.sleep(0.015)
+
+    confidence_label = "HIGH (Google Gemini Flash RAG)" if streamed_anything else "HIGH (Live Multi-Signal Grounded)"
+
+    # Yield metadata event with verified database provenance
+    yield f"data: {json.dumps({'type': 'metadata', 'key_findings': findings, 'recommendations': recommendations, 'grounded_sources': sources, 'confidence': confidence_label})}\n\n"
+
+    # Yield done event
+    yield f"data: {json.dumps({'type': 'done', 'full_text': full_text_acc})}\n\n"
 

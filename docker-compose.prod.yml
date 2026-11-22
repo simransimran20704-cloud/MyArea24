@@ -1,0 +1,104 @@
+# ==============================================================================
+# MyArea24 — Production Multi-Container Orchestration (Docker Compose)
+# Runs hardened PostGIS, FastAPI backend with Gunicorn workers, and Nginx edge SPA
+# ==============================================================================
+
+networks:
+  public_net:
+    driver: bridge
+  backend_net:
+    driver: bridge
+    internal: false
+
+volumes:
+  prod_postgres_data:
+    driver: local
+  prod_media_uploads:
+    driver: local
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Managed / Containerized PostgreSQL 16 + PostGIS Extension
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: myarea24_postgres_prod
+    restart: always
+    networks:
+      - backend_net
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-myarea24_prod}
+      POSTGRES_USER: ${POSTGRES_USER:-myarea24_prod}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production_secret}
+    ports:
+      # Bound strictly to localhost loopback for admin maintenance / migration
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - prod_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-myarea24_prod} -d $${POSTGRES_DB:-myarea24_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ----------------------------------------------------------------------------
+  # 2. FastAPI Production Backend (Multi-stage build with Gunicorn workers)
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: myarea24_backend_prod
+    restart: always
+    networks:
+      - backend_net
+      - public_net
+    env_file:
+      - path: .env.production
+        required: false
+      - path: .env
+        required: false
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - PORT=8000
+      - WORKERS=${WORKERS:-2}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
+      - TIMEOUT=120
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-myarea24_prod}:${POSTGRES_PASSWORD:-change_me_in_production_secret}@postgres:5432/${POSTGRES_DB:-myarea24_prod}}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,https://myarea24.in,https://app.myarea24.in}
+    volumes:
+      - prod_media_uploads:/app/static/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ----------------------------------------------------------------------------
+  # 3. Nginx Reverse Proxy & Frontend Static File Gateway
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+    container_name: myarea24_frontend_prod
+    restart: always
+    networks:
+      - public_net
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3

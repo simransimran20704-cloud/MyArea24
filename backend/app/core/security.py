@@ -120,3 +120,35 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
 def generate_otp_code(length: int = 6) -> str:
     """Generates a secure numeric OTP code (e.g. '482910')."""
     return "".join(secrets.choice("0123456789") for _ in range(length))
+
+
+def hash_password(password: str) -> str:
+    """
+    Hashes a password or store security PIN using PBKDF2-HMAC-SHA256 with a unique random salt.
+    Format: pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>
+    """
+    salt = secrets.token_bytes(16)
+    iterations = 100_000
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    salt_b64 = base64.b64encode(salt).decode("utf-8")
+    hash_b64 = base64.b64encode(derived).decode("utf-8")
+    return f"pbkdf2_sha256${iterations}${salt_b64}${hash_b64}"
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verifies a plain password or store security PIN against the stored hash in constant time.
+    """
+    if not hashed_password or not plain_password:
+        return False
+    try:
+        parts = hashed_password.split("$")
+        if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+            return False
+        iterations = int(parts[1])
+        salt = base64.b64decode(parts[2].encode("utf-8"))
+        expected_hash = base64.b64decode(parts[3].encode("utf-8"))
+        actual_hash = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(expected_hash, actual_hash)
+    except Exception:
+        return False

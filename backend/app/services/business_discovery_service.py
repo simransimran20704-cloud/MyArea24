@@ -39,46 +39,6 @@ CATEGORY_IMAGES = {
     "Auto Services": "https://images.unsplash.com/photo-1486006920555-c77dce18193b?auto=format&fit=crop&w=600&q=80",
 }
 
-SAMPLE_PRODUCTS_BY_CATEGORY = {
-    "Grocery & Supermarket": [
-        ("Aashirvaad Shudh Chakki Atta (10kg)", 420.0, 475.0, "10kg pack", "in_stock"),
-        ("Amul Gold Full Cream Milk (1L Pouch)", 68.0, 68.0, "1L", "in_stock"),
-        ("Tata Salt Vacuum Evaporated (1kg)", 28.0, 30.0, "1kg", "in_stock"),
-        ("Fortune Sunlite Refined Sunflower Oil (1L)", 145.0, 160.0, "1L pouch", "in_stock"),
-    ],
-    "Electronics": [
-        ("Samsung Galaxy A35 5G Smartphone (8GB/128GB)", 26499.0, 28999.0, "1 unit", "in_stock"),
-        ("Redmi Note 13 Pro 5G Phone (8GB/256GB)", 23999.0, 25999.0, "1 unit", "in_stock"),
-        ("Fast Charging USB-C Braided Cable (1.5m)", 299.0, 599.0, "1 pc", "in_stock"),
-        ("Wireless Bluetooth Earbuds TWS", 1299.0, 2499.0, "1 unit", "in_stock"),
-        ("Heavy Duty 4-Socket Power Surge Strip", 499.0, 899.0, "1 pc", "in_stock"),
-    ],
-    "Bakery & Sweets": [
-        ("Fresh Belgian Chocolate Truffle Cake (500g)", 450.0, 550.0, "500g", "in_stock"),
-        ("Multigrain Wholewheat Artisan Bread", 55.0, 65.0, "400g loaf", "in_stock"),
-        ("Fresh Kaju Katli Gift Box", 380.0, 450.0, "250g box", "in_stock"),
-    ],
-    "Pharmacy & Wellness": [
-        ("Digital Infrared Forehead Thermometer", 799.0, 1299.0, "1 unit", "in_stock"),
-        ("First Aid Antiseptic Liquid (500ml)", 175.0, 195.0, "500ml", "in_stock"),
-        ("Multivitamin & Zinc Immunity Tablets (60 pcs)", 320.0, 450.0, "Bottle of 60", "in_stock"),
-    ],
-    "Restaurant & Cafe": [
-        ("Special Masala Chai & Bun Maska Combo", 99.0, 130.0, "1 serve", "in_stock"),
-        ("Classic Cold Coffee with Ice Cream", 120.0, 160.0, "300ml", "in_stock"),
-        ("Paneer Tikka Grilled Sandwich", 140.0, 180.0, "1 plate", "in_stock"),
-    ],
-    "Fashion & Apparel": [
-        ("Men's Premium Cotton Polo T-Shirt", 499.0, 799.0, "1 pc", "in_stock"),
-        ("Women's Casual Printed Kurti", 599.0, 999.0, "1 pc", "in_stock"),
-        ("Comfort Stretch Denim Jeans", 899.0, 1499.0, "1 pc", "in_stock"),
-    ],
-    "Auto Services": [
-        ("Engine Oil Change & Filter Replacement", 850.0, 1100.0, "1 service", "in_stock"),
-        ("Complete Two-Wheeler General Servicing", 450.0, 650.0, "1 service", "in_stock"),
-    ],
-}
-
 
 def extract_locality_tokens(locality: Optional[str], city: Optional[str] = None) -> List[str]:
     """
@@ -235,71 +195,15 @@ def sync_live_businesses(
                         )
                         db.add(biz)
                         db.flush()  # assign biz.id
-
-                        # Seed real local sample products for this store
-                        sample_prods = SAMPLE_PRODUCTS_BY_CATEGORY.get(cat_title, [])
-                        for p_title, p_price, p_mrp, p_unit, p_avail in sample_prods:
-                            prod = Product(
-                                business_id=biz.id,
-                                name=p_title,
-                                brand=p_title.split()[0] if p_title else "Local",
-                                category=cat_title,
-                                description=f"Authentic {p_title} available locally at {name}.",
-                                local_price=p_price,
-                                mrp=p_mrp,
-                                online_price=p_mrp,
-                                online_provider="Blinkit / Amazon",
-                                availability_status=p_avail,
-                                stock_quantity=25,
-                                is_featured=True,
-                            )
-                            db.add(prod)
-
-                        # Seed an authentic welcome offer with real coupon and dates
-                        now_dt = datetime.datetime.utcnow()
-                        offer_title = f"Welcome Flat 10% Off at {name}"
-                        discount_text = "10% OFF"
-                        coupon_code = "MYAREA10"
-                        if "grocery" in cat_title.lower():
-                            offer_title = f"Flat ₹50 Off on Groceries at {name}"
-                            discount_text = "₹50 OFF"
-                            coupon_code = "GROCERY50"
-                        elif "bakery" in cat_title.lower() or "sweet" in cat_title.lower():
-                            offer_title = f"Flat 15% Off on Fresh Bakes & Sweets at {name}"
-                            discount_text = "15% OFF"
-                            coupon_code = "SWEET15"
-                        elif "pharmacy" in cat_title.lower() or "wellness" in cat_title.lower():
-                            offer_title = f"Flat 10% Off on Wellness Essentials at {name}"
-                            discount_text = "10% OFF"
-                            coupon_code = "HEALTH10"
-                        elif "electronics" in cat_title.lower():
-                            offer_title = f"Up to 20% Off on Phones & Accessories at {name}"
-                            discount_text = "20% OFF"
-                            coupon_code = "TECH20"
-                        elif "cafe" in cat_title.lower() or "restaurant" in cat_title.lower():
-                            offer_title = f"Combo Deal: Flat 15% Off on Meals at {name}"
-                            discount_text = "15% OFF"
-                            coupon_code = "FEAST15"
-
-                        offer = Offer(
-                            business_id=biz.id,
-                            title=offer_title,
-                            description=f"Exclusive local deal from {name} in {loc}. Show coupon code in-store or mention on WhatsApp/Call to redeem.",
-                            discount_text=discount_text,
-                            coupon_code=coupon_code,
-                            category=cat_title,
-                            valid_from=now_dt,
-                            valid_until=now_dt + datetime.timedelta(days=30),
-                            is_active=True,
-                        )
-                        db.add(offer)
+                        # Authentic behavior per requirements: Do NOT auto-seed fake/demo products or offers.
+                        # Products & Offers are strictly user/merchant submitted.
 
                         added_count += 1
             except Exception as e:
                 logger.debug(f"Failed business discovery for {q}: {e}")
 
-    # Resilient Pan-India fallback when TomTom key is absent/offline on a populated DB
-    if added_count == 0 and db.query(Business).count() >= 3:
+    # Resilient Pan-India fallback when TomTom key is absent/offline on an unpopulated DB
+    if added_count == 0 and db.query(Business).count() < 4:
         loc_clean = (locality_name or city_name or "Central Market").split(",")[0].strip()
         c_clean = (city_name or loc_clean).split(",")[0].strip()
         fallback_Presets = [
@@ -341,32 +245,7 @@ def sync_live_businesses(
             )
             db.add(biz)
             db.flush()
-            for p_title, p_price, p_mrp, p_unit, p_avail in SAMPLE_PRODUCTS_BY_CATEGORY.get(cat_title, []):
-                db.add(Product(
-                    business_id=biz.id,
-                    name=p_title,
-                    brand=p_title.split()[0] if p_title else "Local",
-                    category=cat_title,
-                    description=f"Authentic {p_title} available for immediate offline pickup at {b_name}.",
-                    local_price=p_price,
-                    mrp=p_mrp,
-                    online_price=p_mrp,
-                    online_provider="Amazon / Flipkart",
-                    availability_status=p_avail,
-                    stock_quantity=15,
-                    is_featured=True,
-                ))
-            db.add(Offer(
-                business_id=biz.id,
-                title=f"Flat 15% In-Store Discount at {b_name}",
-                description=f"Walk-in customer offer at {b_name} ({loc_clean}). Show coupon code at billing counter.",
-                discount_text="15% OFF",
-                coupon_code="MYAREA15",
-                category=cat_title,
-                valid_from=now_dt,
-                valid_until=now_dt + datetime.timedelta(days=30),
-                is_active=True,
-            ))
+            # Authentic listings only: Do not auto-seed demo products or offers
             added_count += 1
 
     if added_count > 0:
@@ -388,160 +267,9 @@ def sync_live_services(
     locality_name: Optional[str] = None,
 ) -> int:
     """
-    Discovers and synthesizes verified hyperlocal service professionals (Electricians, Plumbers,
-    AC & Appliance Technicians, Carpenters, RO Purifier & Pest Control specialists) around any
-    Indian city or locality so /api/v1/services works across 100% of India.
+    Authentic service listings only: Services are strictly user or merchant submitted.
+    No synthetic service generation per requirements.
     """
-    loc_raw = (locality_name or city_name or "Central Sector").strip()
-    # Extract clean locality and city labels
-    parts = [p.strip() for p in loc_raw.split(",") if p.strip()]
-    loc_clean = parts[0] if parts else "Main Market"
-    c_clean = (city_name or (parts[1] if len(parts) > 1 else loc_clean)).split(",")[0].strip()
+    return 0
 
-    # If loc_clean starts with city name (e.g. 'Delhi Connaught Place'), strip city prefix for cleaner display
-    if c_clean and loc_clean.lower().startswith(c_clean.lower() + " ") and len(loc_clean) > len(c_clean) + 2:
-        loc_clean = loc_clean[len(c_clean):].strip()
-
-    service_presets = [
-        (
-            f"{loc_clean} Rapid Response Electrician & Inverter Care",
-            "Electrician",
-            f"24/7 emergency electrical fault repair, MCB/fuse box replacement, inverter-battery wiring, and ceiling fan installation across {loc_clean} & {c_clean}.",
-            199.0,
-            "per visit",
-            "24/7 Emergency & Regular",
-            8,
-            4.8,
-            42,
-            0.0025,
-            0.0018,
-            "+91-98112-44101",
-        ),
-        (
-            f"{loc_clean} Master Plumbing & Water Motor Works",
-            "Plumber",
-            f"Verified local plumber for pipeline leakage detection, overhead tank motor repair, bathroom fittings, and drainage unblocking in {loc_clean}, {c_clean}.",
-            249.0,
-            "per visit",
-            "07:30 AM - 09:30 PM",
-            10,
-            4.7,
-            36,
-            -0.0022,
-            0.0028,
-            "+91-98112-44102",
-        ),
-        (
-            f"CoolBreeze AC, Fridge & Washing Machine Tech ({loc_clean})",
-            "AC Repair",
-            f"Authorized split & window AC servicing, gas charging, PCB repair, refrigerator compressor & washing machine doorstep service in {loc_clean}.",
-            399.0,
-            "per service",
-            "08:00 AM - 09:00 PM",
-            7,
-            4.8,
-            58,
-            0.0031,
-            -0.0024,
-            "+91-98112-44103",
-        ),
-        (
-            f"{loc_clean} Precision Carpentry & Door Lock Specialists",
-            "Carpenter",
-            f"On-demand carpenter for door lock repair, modular kitchen hinges, cupboard sliding tracks, and furniture assembly in {loc_clean}, {c_clean}.",
-            299.0,
-            "per visit",
-            "09:00 AM - 08:00 PM",
-            12,
-            4.6,
-            29,
-            -0.0019,
-            -0.0031,
-            "+91-98112-44104",
-        ),
-        (
-            f"PureDrop RO Water Purifier & Geyser Service ({loc_clean})",
-            "Appliance Repair",
-            f"RO membrane & sediment filter replacement, TDS calibration, and instant/storage water geyser heating element repair across {loc_clean}.",
-            250.0,
-            "per visit",
-            "08:30 AM - 08:30 PM",
-            6,
-            4.7,
-            31,
-            0.0015,
-            0.0035,
-            "+91-98112-44105",
-        ),
-        (
-            f"SafeHome Herbal Pest Control & Deep Cleaning ({c_clean})",
-            "Cleaning & Pest Control",
-            f"Odorless herbal cockroach, termite & mosquito control, kitchen deep degreasing, and bathroom sanitization for homes and shops in {loc_clean}, {c_clean}.",
-            699.0,
-            "per session",
-            "08:00 AM - 07:00 PM",
-            9,
-            4.9,
-            64,
-            -0.0034,
-            0.0012,
-            "+91-98112-44106",
-        ),
-    ]
-
-    added = 0
-    for (
-        p_name,
-        cat,
-        desc,
-        price,
-        unit,
-        timing,
-        exp_yrs,
-        rating,
-        reviews,
-        dlat,
-        dlon,
-        phone,
-    ) in service_presets:
-        exists = (
-            db.query(ServiceListing)
-            .filter(func.lower(ServiceListing.provider_name) == p_name.lower())
-            .first()
-        )
-        if exists:
-            continue
-
-        svc = ServiceListing(
-            provider_name=p_name[:190],
-            category=cat,
-            description=desc,
-            service_area=f"{loc_clean}, {c_clean} (within 10 km)",
-            locality=loc_clean[:90],
-            city=c_clean[:90],
-            latitude=round(float(lat) + dlat, 6),
-            longitude=round(float(lon) + dlon, 6),
-            phone=phone,
-            whatsapp=phone.replace("-", "").replace("+", ""),
-            price_starting_at=price,
-            price_unit=unit,
-            timing=timing,
-            experience_years=exp_yrs,
-            is_verified=True,
-            is_available=True,
-            rating=rating,
-            review_count=reviews,
-        )
-        db.add(svc)
-        added += 1
-
-    if added > 0:
-        try:
-            db.commit()
-            logger.info(f"Synthesized {added} local service providers for {loc_clean}, {c_clean} ({lat}, {lon}).")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to commit local services: {e}")
-
-    return added
 

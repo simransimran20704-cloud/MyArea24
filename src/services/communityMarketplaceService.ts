@@ -53,6 +53,7 @@ export interface LiveBusinessItem {
 export interface LiveProductItem {
   id: string;
   numericId?: number;
+  businessId?: number | string;
   name: string;
   brand: string;
   cat: string;
@@ -76,6 +77,8 @@ export interface LiveProductItem {
   freshnessLabel: string;
   discount?: string;
   img: string;
+  locality?: string;
+  city?: string;
   lat: number;
   lng: number;
 }
@@ -110,6 +113,7 @@ export interface LiveServiceItem {
 export interface LiveOfferItem {
   id: string;
   numericId?: number;
+  businessId?: number | string;
   title: string;
   sub: string;
   description: string;
@@ -125,6 +129,10 @@ export interface LiveOfferItem {
   dist: string;
   distanceKm: number;
   img: string;
+  locality?: string;
+  city?: string;
+  lat?: number;
+  lng?: number;
 }
 
 export interface LiveEventItem {
@@ -134,6 +142,7 @@ export interface LiveEventItem {
   cat: string;
   organizer: string;
   date: string;
+  startTimeIso?: string;
   time: string;
   loc: string;
   address: string;
@@ -152,6 +161,8 @@ export interface LiveEventItem {
   source: string;
   registrationUrl?: string;
   img: string;
+  locality?: string;
+  city?: string;
   lat: number;
   lng: number;
 }
@@ -167,11 +178,13 @@ export interface LiveEmergencyFacility {
   distanceKm: number;
   is24x7: boolean;
   bloodBankAvailable: boolean;
+  locality?: string;
+  city?: string;
   lat: number;
   lng: number;
 }
 
-import { requestBackendJson } from '../config/apiClient';
+import { requestBackendJson, apiClient, resolveApiUrl, getClientAuthHeaders } from '../config/apiClient';
 
 /* ============================================================================
    HELPER UTILITIES & BACKEND FETCHERS
@@ -289,18 +302,10 @@ export async function syncSavedBookmarkToBackend(
 }
 
 /* ============================================================================
-   2. SARVAM AI HINDI / ENGLISH VOICE INPUT (STT) & TEXT-TO-SPEECH (TTS)
+   2. HINDI / ENGLISH VOICE INPUT (STT) & TEXT-TO-SPEECH (TTS)
+   Secured via FastAPI server-side proxy (/api/v1/intelligence/voice/tts)
+   with zero-dependency Browser Web Speech API fallback.
    ============================================================================ */
-
-const SARVAM_KEY_STORAGE = 'myarea24_sarvam_api_key';
-
-export function getSarvamApiKey(): string {
-  return (
-    (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_SARVAM_API_KEY ||
-    localStorage.getItem(SARVAM_KEY_STORAGE) ||
-    ''
-  );
-}
 
 export async function speakTextWithSarvamOrBrowser(
   text: string,
@@ -308,49 +313,36 @@ export async function speakTextWithSarvamOrBrowser(
   onEnd?: () => void
 ): Promise<{ provider: 'Sarvam AI Bulbul v1' | 'Browser Neural Speech'; stop: () => void }> {
   const cleanText = text.replace(/[*#_`~]/g, '').slice(0, 480);
-  const sarvamKey = getSarvamApiKey();
 
-  // 1. Try Sarvam AI Bulbul TTS if API key is available
-  if (sarvamKey) {
-    try {
-      const res = await fetch('https://api.sarvam.ai/text-to-speech', {
+  // 1. Try secure backend Sarvam AI Bulbul TTS endpoint (server-side authenticated)
+  try {
+    const data = await requestBackend<{ audio_base64?: string }>(
+      '/api/v1/intelligence/voice/tts',
+      {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'api-subscription-key': sarvamKey,
-        },
         body: JSON.stringify({
-          inputs: [cleanText],
-          target_language_code: lang,
-          speaker: 'meera',
-          pitch: 0,
-          pace: 1.05,
-          loudness: 1.5,
-          speech_sample_rate: 16000,
-          enable_preprocessing: true,
-          model: 'bulbul:v1',
+          text: cleanText,
+          lang,
         }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const base64Audio = data?.audios?.[0];
-        if (base64Audio) {
-          const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
-          audio.onended = () => onEnd?.();
-          await audio.play();
-          return {
-            provider: 'Sarvam AI Bulbul v1',
-            stop: () => {
-              audio.pause();
-              audio.currentTime = 0;
-              onEnd?.();
-            },
-          };
-        }
-      }
-    } catch {
-      // Fall through to Web Speech API
+      },
+      8000
+    );
+
+    if (data?.audio_base64) {
+      const audio = new Audio(`data:audio/wav;base64,${data.audio_base64}`);
+      audio.onended = () => onEnd?.();
+      await audio.play();
+      return {
+        provider: 'Sarvam AI Bulbul v1',
+        stop: () => {
+          audio.pause();
+          audio.currentTime = 0;
+          onEnd?.();
+        },
+      };
     }
+  } catch {
+    // Fall through to Web Speech API
   }
 
   // 2. Fallback to Browser Web Speech Synthesis (supports hi-IN & en-IN natively)
@@ -450,9 +442,77 @@ export const CUSTOM_PROD_KEY = 'myarea24_custom_products_v1';
 export const CUSTOM_SVC_KEY = 'myarea24_custom_services_v1';
 export const CUSTOM_OFFER_KEY = 'myarea24_custom_offers_v1';
 export const CUSTOM_EVENT_KEY = 'myarea24_custom_events_v1';
+export const CUSTOM_INVENTORY_SNAPSHOTS_KEY = 'myarea24_inventory_snapshots_v1';
 export const MERCHANT_REGISTRATION_KEY = 'myarea24_merchant_registered_v1';
 export const MERCHANT_ACCOUNTS_KEY = 'myarea24_merchant_accounts_v1';
 export const MERCHANT_SESSION_KEY = 'myarea24_merchant_session_v1';
+
+export interface InventorySnapshotItem {
+  id: string;
+  type: 'product' | 'bill' | 'shelf' | 'storefront';
+  url: string;
+  timestamp: string;
+  notes?: string;
+  itemName?: string;
+  category?: string;
+  price?: number;
+}
+
+export function getStoredInventorySnapshots(): InventorySnapshotItem[] {
+  return loadLocalList<InventorySnapshotItem>(CUSTOM_INVENTORY_SNAPSHOTS_KEY);
+}
+
+export function saveInventorySnapshot(snapshot: InventorySnapshotItem): void {
+  const existing = getStoredInventorySnapshots();
+  saveLocalList(CUSTOM_INVENTORY_SNAPSHOTS_KEY, [snapshot, ...existing]);
+}
+
+export async function uploadMarketplaceMedia(file: File): Promise<{
+  success: boolean;
+  url?: string;
+  cdnUrl?: string;
+  thumbnailUrl?: string;
+  error?: string;
+}> {
+  try {
+    const ep =
+      resolveApiUrl('/api/v1/merchant/upload-image') ||
+      resolveApiUrl('/api/v1/merchant/upload') ||
+      resolveApiUrl('/api/v1/products/upload-image') ||
+      resolveApiUrl('/api/v1/products/upload');
+    if (!ep) {
+      return { success: false, error: 'Upload endpoint unavailable' };
+    }
+    const headers = getClientAuthHeaders();
+    const authHeaders: Record<string, string> = {};
+    if (headers['Authorization']) authHeaders['Authorization'] = headers['Authorization'];
+    if (headers['X-Merchant-Phone']) authHeaders['X-Merchant-Phone'] = headers['X-Merchant-Phone'];
+    if (headers['X-Merchant-ID']) authHeaders['X-Merchant-ID'] = headers['X-Merchant-ID'];
+
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+
+    const res = await fetch(ep, {
+      method: 'POST',
+      headers: authHeaders,
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      return { success: false, error: err?.detail || err?.message || `Upload failed with status ${res.status}` };
+    }
+    const data = await res.json();
+    return {
+      success: true,
+      url: data.url,
+      cdnUrl: data.cdn_url || data.url,
+      thumbnailUrl: data.thumbnail_url || data.url,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Network error during media upload' };
+  }
+}
 
 export interface MerchantRegistrationProfile {
   id?: string;
@@ -472,6 +532,7 @@ export interface MerchantRegistrationProfile {
   closingTime: string;
   storePin?: string; // 4-6 digit Security PIN or Password
   tagline?: string;
+  logoUrl?: string;
   isVerified: boolean;
   registeredAt: string;
 }
@@ -489,6 +550,10 @@ export function getStoredMerchantAccounts(): MerchantRegistrationProfile[] {
 
 export function getStoredMerchantSession(): MerchantRegistrationProfile | null {
   try {
+    const token = localStorage.getItem('myarea24_merchant_token');
+    if (!token) {
+      return null;
+    }
     const raw = localStorage.getItem(MERCHANT_SESSION_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
@@ -502,15 +567,18 @@ export function getStoredMerchantSession(): MerchantRegistrationProfile | null {
 
 export function saveMerchantSession(profile: MerchantRegistrationProfile): void {
   try {
-    localStorage.setItem(MERCHANT_SESSION_KEY, JSON.stringify(profile));
-    localStorage.setItem(MERCHANT_REGISTRATION_KEY, JSON.stringify(profile));
-    window.dispatchEvent(new CustomEvent('myarea24_merchant_session_changed', { detail: profile }));
+    const sanitized = { ...profile };
+    delete sanitized.storePin;
+    localStorage.setItem(MERCHANT_SESSION_KEY, JSON.stringify(sanitized));
+    window.dispatchEvent(new CustomEvent('myarea24_merchant_session_changed', { detail: sanitized }));
   } catch {}
 }
 
 export function clearMerchantSession(): void {
   try {
     localStorage.removeItem(MERCHANT_SESSION_KEY);
+    localStorage.removeItem('myarea24_merchant_token');
+    localStorage.removeItem('myarea24_merchant_portal_state_v1');
     window.dispatchEvent(new CustomEvent('myarea24_merchant_session_changed', { detail: null }));
   } catch {}
 }
@@ -520,7 +588,10 @@ export function getStoredMerchantProfile(): MerchantRegistrationProfile | null {
   const session = getStoredMerchantSession();
   if (session) return session;
 
+  // Do not expose unauthenticated profile without active token
   try {
+    const token = localStorage.getItem('myarea24_merchant_token');
+    if (!token) return null;
     const raw = localStorage.getItem(MERCHANT_REGISTRATION_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
@@ -534,9 +605,11 @@ export function getStoredMerchantProfile(): MerchantRegistrationProfile | null {
 
 export function saveMerchantRegistration(profile: MerchantRegistrationProfile): void {
   try {
+    const sanitized = { ...profile };
+    delete sanitized.storePin;
     const profileWithId: MerchantRegistrationProfile = {
-      ...profile,
-      id: profile.id || `biz_${profile.businessName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${Date.now().toString(36)}`,
+      ...sanitized,
+      id: sanitized.id || `biz_${sanitized.businessName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${Date.now().toString(36)}`,
     };
 
     // 1. Update legacy single registration pointer
@@ -567,50 +640,114 @@ export function saveMerchantRegistration(profile: MerchantRegistrationProfile): 
   } catch {}
 }
 
-export function verifyMerchantCredentials(
+export async function verifyMerchantCredentials(
   identifier: string,
   storePin: string
-): { success: boolean; profile?: MerchantRegistrationProfile; error?: string } {
-  const cleanId = identifier.trim().toLowerCase().replace(/\s+/g, '');
+): Promise<{ success: boolean; profile?: MerchantRegistrationProfile; error?: string }> {
+  const cleanId = identifier.trim();
   const cleanPin = storePin.trim();
-  const accounts = getStoredMerchantAccounts();
 
-  // Also check single legacy profile
-  const legacy = getStoredMerchantProfile();
-  const allAccounts = [...accounts];
-  if (legacy && !allAccounts.some((a) => a.phone === legacy.phone)) {
-    allAccounts.push(legacy);
+  if (!cleanId) {
+    return { success: false, error: 'Please enter your registered store phone or email.' };
+  }
+  if (!cleanPin) {
+    return { success: false, error: 'Please enter your Store Security PIN or Password.' };
   }
 
-  const match = allAccounts.find((a) => {
-    const phoneClean = (a.phone || '').replace(/\s+/g, '').toLowerCase();
-    const emailClean = (a.email || '').toLowerCase().trim();
-    return (
-      phoneClean === cleanId ||
-      phoneClean.endsWith(cleanId) ||
-      cleanId.endsWith(phoneClean) ||
-      emailClean === cleanId
-    );
-  });
+  // 1. Authoritative backend authentication against database
+  try {
+    const res = await apiClient.post<{
+      status?: string;
+      token?: string;
+      profile?: MerchantRegistrationProfile;
+      detail?: string;
+      message?: string;
+      business?: any;
+    }>('/api/v1/merchant/login', {
+      identifier: cleanId,
+      store_pin: cleanPin,
+    });
 
-  if (!match) {
+    if (res.ok && res.data?.status === 'success') {
+      if (res.data.token) {
+        localStorage.setItem('myarea24_merchant_token', res.data.token);
+        localStorage.setItem('myarea24_auth_token', res.data.token);
+      }
+      if (res.data.profile) {
+        saveMerchantSession(res.data.profile);
+        return { success: true, profile: res.data.profile };
+      }
+    }
+
+    // Live backend returned structured error (400, 401, 403, 404)
+    const serverError =
+      (res.data as any)?.detail ||
+      res.error ||
+      (res.data as any)?.message ||
+      'Invalid store credentials or access denied.';
+    return { success: false, error: serverError };
+  } catch (err: any) {
+    console.error('[communityMarketplaceService] Merchant authentication failed', err);
     return {
       success: false,
-      error: 'No merchant storefront found matching this phone number or email.',
+      error: 'Unable to reach authentication server. Please check your network connection.',
     };
   }
+}
 
-  // If storePin was configured, check it. (If default demo account had no PIN, permit or require PIN)
-  if (match.storePin && match.storePin !== cleanPin) {
-    return {
-      success: false,
-      error: 'Incorrect Store Access PIN / Password. Please check and try again.',
-    };
+export async function registerMerchantOnBackend(
+  profile: MerchantRegistrationProfile,
+  storePin: string
+): Promise<{ success: boolean; profile?: MerchantRegistrationProfile; error?: string }> {
+  try {
+    const res = await apiClient.post<{
+      status?: string;
+      token?: string;
+      profile?: MerchantRegistrationProfile;
+      detail?: string;
+    }>('/api/v1/merchant/register', {
+      business_name: profile.businessName,
+      category: profile.category,
+      owner_name: profile.ownerName,
+      phone: profile.phone,
+      whatsapp: profile.whatsapp,
+      email: profile.email,
+      full_address: profile.fullAddress,
+      locality: profile.locality,
+      city: profile.city,
+      pincode: profile.pincode,
+      doc_type: profile.docType,
+      doc_number: profile.docNumber,
+      opening_time: profile.openingTime,
+      closing_time: profile.closingTime,
+      store_pin: storePin,
+    });
+
+    if (res.ok && res.data?.status === 'success') {
+      if (res.data.token) {
+        localStorage.setItem('myarea24_merchant_token', res.data.token);
+        localStorage.setItem('myarea24_auth_token', res.data.token);
+      }
+      const registered = res.data.profile || profile;
+      saveMerchantRegistration(registered);
+      return { success: true, profile: registered };
+    } else if (res.data?.detail || res.error) {
+      return {
+        success: false,
+        error: res.data?.detail || res.error || 'Merchant registration failed on server.',
+      };
+    }
+  } catch (err: any) {
+    if (err?.message) {
+      return { success: false, error: err.message };
+    }
+    console.warn('[communityMarketplaceService] Offline registration fallback', err);
+    saveMerchantRegistration(profile);
+    return { success: true, profile };
   }
 
-  // Set active session
-  saveMerchantSession(match);
-  return { success: true, profile: match };
+  saveMerchantRegistration(profile);
+  return { success: true, profile };
 }
 
 export function loadLocalList<T>(key: string): T[] {
@@ -651,6 +788,612 @@ export interface LiveCommunityMarketplaceState {
   refreshMarketplace: () => void;
 }
 
+export interface MarketplaceModulesData {
+  businesses: LiveBusinessItem[];
+  products: LiveProductItem[];
+  services: LiveServiceItem[];
+  offers: LiveOfferItem[];
+  events: LiveEventItem[];
+  emergencyFacilities: LiveEmergencyFacility[];
+}
+
+export function getLocalizedNeighborhoodBusinesses(
+  _localityShort: string,
+  _cityShort: string,
+  _lat: number,
+  _lng: number
+): LiveBusinessItem[] {
+  // Pure authentic data: Zero fabricated, demo, or template businesses.
+  return [];
+}
+
+export async function fetchLiveMarketplaceModules(
+  liveIntel: LiveAreaIntelligence
+): Promise<MarketplaceModulesData> {
+  const { lat, lng, areaName, city, pincode } = liveIntel.location;
+  const localityShort = areaName ? areaName.split(',')[0].trim() : 'Local Area';
+  const cityShort = city || (areaName && areaName.includes(',') ? areaName.split(',')[1]?.trim() : 'India') || 'India';
+  let qParams = `locality=${encodeURIComponent(localityShort)}&city=${encodeURIComponent(
+    cityShort
+  )}&user_lat=${lat}&user_lon=${lng}`;
+  if (pincode && pincode.trim().length === 6) {
+    qParams += `&pincode=${encodeURIComponent(pincode.trim())}`;
+  }
+
+  const [
+    backendBiz,
+    backendProd,
+    backendSvc,
+    backendOffers,
+    backendEvents,
+    backendEmergency,
+    overpassBiz,
+  ] = await Promise.all([
+    requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/businesses?${qParams}&page_size=24`),
+    requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/products?${qParams}&page_size=24`),
+    requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/services?${qParams}&page_size=20`),
+    requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/offers?${qParams}&page_size=20`),
+    requestBackend<{ items: Record<string, unknown>[] }>(
+      `/api/v1/events?locality=${encodeURIComponent(localityShort)}&city=${encodeURIComponent(
+        cityShort
+      )}&lat=${lat}&lon=${lng}&page_size=150`
+    ),
+    requestBackend<{ facilities: Record<string, unknown>[] }>(
+      `/api/v1/emergency/facilities?latitude=${lat}&longitude=${lng}&city=${encodeURIComponent(
+        cityShort
+      )}&locality=${encodeURIComponent(localityShort)}`
+    ),
+    fetchOverpassBusinesses(lat, lng, localityShort, cityShort),
+  ]);
+
+  const customBiz = loadLocalList<LiveBusinessItem>(CUSTOM_BIZ_KEY);
+  const apiBizList: LiveBusinessItem[] = (backendBiz?.items || []).map((b, idx) => {
+    const rawCat = String(b.category || 'Restaurants');
+    const mappedCat = mapToFrontendBizCategory(rawCat);
+    const dKm = Number(b.distance_km ?? haversineKm(lat, lng, Number(b.latitude || lat), Number(b.longitude || lng)));
+    return {
+      id: `api-biz-${b.id || idx}`,
+      numericId: Number(b.id || idx + 1),
+      slug: String(b.slug || `biz-${idx}`),
+      name: String(b.name || `${localityShort} Store`),
+      cat: mappedCat,
+      sub: `${String(b.subcategory || rawCat)} • ${String(b.locality || localityShort)}`,
+      description: String(b.description || `Verified merchant in ${localityShort}, ${cityShort}`),
+      address: String(b.address || `${localityShort}, ${cityShort}`),
+      locality: String(b.locality || localityShort),
+      city: String(b.city || cityShort),
+      rating: b.rating ? Number(b.rating).toFixed(1) : 'New',
+      reviews: b.review_count ? `(${b.review_count})` : '(0)',
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      status: b.is_open_now === false ? 'Closed' : 'Open',
+      closes: `Closes ${b.closing_time || '10:00 PM'}`,
+      openingTime: String(b.opening_time || '09:00'),
+      closingTime: String(b.closing_time || '22:00'),
+      phone: b.phone ? String(b.phone) : '',
+      whatsapp: b.whatsapp ? String(b.whatsapp) : (b.phone ? String(b.phone) : ''),
+      img: pickBizImage(mappedCat, idx),
+      verified: Boolean(b.is_verified ?? true),
+      trending: idx < 3,
+      popular: Number(b.rating || 4.6) >= 4.5,
+      lat: Number(b.latitude || lat + 0.002),
+      lng: Number(b.longitude || lng + 0.002),
+      activeProductsCount: Number(b.active_products_count || 0),
+      activeOffersCount: Number(b.active_offers_count || 0),
+      source: 'FastAPI /api/v1/businesses',
+    };
+  });
+
+  const mergedBizMap = new Map<string, LiveBusinessItem>();
+  for (const item of [...customBiz, ...apiBizList, ...overpassBiz]) {
+    const key = item.name.toLowerCase().trim();
+    if (!mergedBizMap.has(key)) {
+      mergedBizMap.set(key, item);
+    }
+  }
+
+  const finalBiz = Array.from(mergedBizMap.values()).sort((a, b) => a.distanceKm - b.distanceKm);
+
+  const customProds = loadLocalList<LiveProductItem>(CUSTOM_PROD_KEY);
+  const apiProdList: LiveProductItem[] = (backendProd?.items || []).map((p, idx) => {
+    const bizObj = (p.business as Record<string, unknown>) || {};
+    const localPrice = Number(p.local_price || 120);
+    const onlinePrice = Number(p.online_price || p.mrp || Math.round(localPrice * 1.15));
+    const bizLat = Number(bizObj.latitude || p.latitude || 0);
+    const bizLng = Number(bizObj.longitude || p.longitude || 0);
+    const dKm = Number(
+      bizObj.distance_km ?? (bizLat && bizLng ? haversineKm(lat, lng, bizLat, bizLng) : 999)
+    );
+    const mappedCat = mapToFrontendProdCategory(String(p.category || 'Groceries'));
+    const savings = Math.max(0, onlinePrice - localPrice);
+    return {
+      id: `api-prod-${p.id || idx}`,
+      numericId: Number(p.id || idx + 1),
+      name: String(p.name || 'Local Essential'),
+      brand: String(p.brand || 'Verified Local'),
+      cat: mappedCat,
+      price: `₹${localPrice.toLocaleString('en-IN')}`,
+      localPriceNum: localPrice,
+      oldPrice: onlinePrice > localPrice ? `₹${onlinePrice.toLocaleString('en-IN')}` : undefined,
+      onlinePriceNum: onlinePrice,
+      onlineProvider: String(p.online_provider || 'Blinkit / Amazon'),
+      savingsAmount: savings,
+      savingsPercent: onlinePrice > 0 ? Math.round((savings / onlinePrice) * 100) : 0,
+      betterOffline: localPrice <= onlinePrice,
+      unit: '1 unit • In Stock',
+      store: String(bizObj.name || `${localityShort} Store`),
+      storeAddress: String(bizObj.address || `${localityShort}, ${cityShort}`),
+      locality: String(bizObj.locality || p.locality || localityShort),
+      city: String(bizObj.city || p.city || cityShort),
+      phone: bizObj.phone ? String(bizObj.phone) : '',
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      inStock: p.in_stock !== false && p.availability_status !== 'out_of_stock' && p.is_active !== false,
+      img: pickProdImage(mappedCat, idx),
+      rating: p.rating ? String(p.rating) : 'New',
+      reviews: p.review_count ? `(${p.review_count})` : '(0)',
+      freshnessLabel: 'Verified Today',
+      businessId: p.business_id ? Number(p.business_id) : undefined,
+      lat: bizLat,
+      lng: bizLng,
+    };
+  });
+
+  // Strict Hyperlocal & Validity Verification:
+  // Shows Products, Services and Offers ONLY when active, valid user-submitted listings are available for the currently selected location.
+  const isListingActiveAndNearby = (
+    item: {
+      lat?: number;
+      lng?: number;
+      distanceKm?: number;
+      storeAddress?: string;
+      locality?: string;
+      city?: string;
+      store?: string;
+      inStock?: boolean;
+      status?: string;
+      is_active?: boolean;
+      is_available?: boolean;
+      is_deleted?: boolean;
+      deleted_at?: string | null;
+      daysLeft?: number;
+      valid?: string;
+      valid_until?: string;
+      expires_at?: string;
+    }
+  ): boolean => {
+    // 1. Exclude deleted listings
+    if (item.is_deleted === true || Boolean(item.deleted_at)) {
+      return false;
+    }
+
+    // 2. Exclude inactive or paused listings
+    if (item.is_active === false || item.is_available === false || item.inStock === false) {
+      return false;
+    }
+    const st = String(item.status || '').toLowerCase();
+    if (st === 'inactive' || st === 'paused' || st === 'draft' || st === 'out_of_stock' || st === 'discontinued') {
+      return false;
+    }
+
+    // 3. Exclude expired listings (especially for Offers)
+    if (typeof item.daysLeft === 'number' && item.daysLeft <= 0) {
+      return false;
+    }
+    if (item.valid && /expired|0\s*days?\s*left/i.test(item.valid)) {
+      return false;
+    }
+    const expiryStr = item.valid_until || item.expires_at;
+    if (expiryStr) {
+      const expDate = new Date(expiryStr);
+      if (!isNaN(expDate.getTime()) && expDate.getTime() < Date.now()) {
+        return false;
+      }
+    }
+
+    // 4. Strict Hyperlocal Location Association:
+    // Distance check: strictly within 6.0 km
+    let dist = item.distanceKm;
+    if (
+      (dist === undefined || isNaN(dist) || dist <= 0) &&
+      typeof item.lat === 'number' &&
+      typeof item.lng === 'number' &&
+      !isNaN(item.lat) &&
+      !isNaN(item.lng) &&
+      (item.lat !== 0 || item.lng !== 0)
+    ) {
+      dist = haversineKm(lat, lng, item.lat, item.lng);
+    }
+
+    if (typeof dist === 'number' && !isNaN(dist) && dist >= 0) {
+      if (dist <= 6.0) return true;
+      if (dist > 8.0) return false;
+    }
+
+    // Locality text matching (e.g. 'Sultanpuri', 'Bandra', 'Connaught Place', 'Rohini')
+    // MUST NOT match broad city (like 'Delhi' or 'Mumbai') or country ('India')
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const cleanTarget = norm(`${item.storeAddress || ''} ${item.locality || ''} ${item.store || ''}`);
+    const cleanLoc = norm(localityShort);
+
+    if (
+      cleanLoc &&
+      cleanLoc.length >= 3 &&
+      cleanLoc !== 'localarea' &&
+      cleanLoc !== 'india'
+    ) {
+      if (cleanTarget.includes(cleanLoc) || (item.locality && cleanLoc.includes(norm(item.locality)))) {
+        return true;
+      }
+      const tokens = localityShort
+        .toLowerCase()
+        .split(/[\s,/-]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 4 && !['area', 'city', 'road', 'main', 'delhi', 'mumbai', 'india'].includes(t));
+      for (const tok of tokens) {
+        if (cleanTarget.includes(tok)) return true;
+      }
+    }
+
+    return false;
+  };
+
+  // Authentic catalog items: only active, valid user-submitted & verified merchant products for the selected location
+  const filteredCustomProds = customProds.filter(isListingActiveAndNearby);
+  const filteredApiProds = apiProdList.filter(isListingActiveAndNearby);
+
+  const mergedProdMap = new Map<string, LiveProductItem>();
+  for (const item of [...filteredCustomProds, ...filteredApiProds]) {
+    const key = item.name.toLowerCase();
+    if (!mergedProdMap.has(key)) {
+      mergedProdMap.set(key, item);
+    }
+  }
+  const finalProds = Array.from(mergedProdMap.values());
+
+  const customSvcs = loadLocalList<LiveServiceItem>(CUSTOM_SVC_KEY);
+  const apiSvcList: LiveServiceItem[] = (backendSvc?.items || []).map((s, idx) => {
+    const sLat = Number(s.latitude || 0);
+    const sLng = Number(s.longitude || 0);
+    const dKm = Number(
+      s.distance_km ?? (sLat && sLng ? haversineKm(lat, lng, sLat, sLng) : 999)
+    );
+    const mappedCat = mapToFrontendSvcCategory(String(s.category || 'Electrician'));
+    const priceNum = Number(s.price_starting_at || s.price_starting || 499);
+    return {
+      id: `api-svc-${s.id || idx}`,
+      numericId: Number(s.id || idx + 1),
+      name: String(s.provider_name || s.title || 'Local Service Provider'),
+      role: `${String(s.category || 'Technician')} Specialist`,
+      cat: mappedCat,
+      description: String(s.description || `Doorstep ${mappedCat} expert in ${localityShort}.`),
+      exp: s.experience_years ? `${s.experience_years} yrs exp` : 'Verified Provider',
+      rating: s.rating ? Number(s.rating).toFixed(1) : 'New',
+      reviews: s.review_count ? `(${s.review_count})` : '(0)',
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      price: `Starts ₹${priceNum}`,
+      priceNum,
+      priceUnit: String(s.price_unit || 'per visit'),
+      avail: s.is_available === false ? 'Busy / Unavailable' : 'Available Today',
+      timing: String(s.timing || '08:00 AM - 09:00 PM'),
+      phone: s.phone ? String(s.phone) : '',
+      whatsapp: s.whatsapp ? String(s.whatsapp) : (s.phone ? String(s.phone) : ''),
+      verified: Boolean(s.is_verified ?? true),
+      img: pickSvcImage(mappedCat, idx),
+      locality: String(s.locality || localityShort),
+      city: String(s.city || cityShort),
+      lat: sLat,
+      lng: sLng,
+    };
+  });
+
+  const filteredCustomSvcs = customSvcs.filter(isListingActiveAndNearby);
+  const filteredApiSvcs = apiSvcList.filter(isListingActiveAndNearby);
+
+  const mergedSvcMap = new Map<string, LiveServiceItem>();
+  for (const item of [...filteredCustomSvcs, ...filteredApiSvcs]) {
+    const key = item.name.toLowerCase();
+    if (!mergedSvcMap.has(key)) {
+      mergedSvcMap.set(key, item);
+    }
+  }
+
+  const customOffers = loadLocalList<LiveOfferItem>(CUSTOM_OFFER_KEY);
+  const apiOfferList: LiveOfferItem[] = (backendOffers?.items || []).map((o, idx) => {
+    const bizObj = (o.business as Record<string, unknown>) || {};
+    const oLat = Number(bizObj.latitude || o.latitude || 0);
+    const oLng = Number(bizObj.longitude || o.longitude || 0);
+    const dKm = Number(
+      o.distance_km ?? bizObj.distance_km ?? (oLat && oLng ? haversineKm(lat, lng, oLat, oLng) : 999)
+    );
+    const mappedCat = mapToFrontendOfferCategory(String(o.category || 'Food & Dining'));
+    const daysLeftNum = Number(o.days_left ?? 12);
+    return {
+      id: `api-offer-${o.id || idx}`,
+      numericId: Number(o.id || idx + 1),
+      title: String(o.title || 'Flat 15% Off In-Store'),
+      sub: String(o.description || `Valid at ${bizObj.name || localityShort}`),
+      description: String(o.description || `Redeemable at counter or via WhatsApp order in ${localityShort}.`),
+      store: String(bizObj.name || `${localityShort} Merchant`),
+      storeAddress: String(bizObj.address || `${localityShort}, ${cityShort}`),
+      locality: String(bizObj.locality || p.locality || localityShort),
+      city: String(bizObj.city || p.city || cityShort),
+      phone: bizObj.phone ? String(bizObj.phone) : '',
+      cat: mappedCat,
+      badge: String(o.discount_text || '15% OFF'),
+      badgeColor: idx % 2 === 0 ? 'bg-orange-500 text-white' : 'bg-emerald-600 text-white',
+      code: String(o.coupon_code || 'MYAREA15'),
+      valid: `${daysLeftNum} days left`,
+      daysLeft: daysLeftNum,
+      claimed: o.claimed_count ? `${o.claimed_count} claimed` : 'Active offer',
+      minBill: `Min bill ₹${o.min_bill || 299}`,
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      img: pickOfferImage(mappedCat, idx),
+      lat: oLat,
+      lng: oLng,
+    };
+  });
+
+  const filteredCustomOffers = customOffers.filter(isListingActiveAndNearby);
+  const filteredApiOffers = apiOfferList.filter(isListingActiveAndNearby);
+
+  const mergedOfferMap = new Map<string, LiveOfferItem>();
+  for (const item of [...filteredCustomOffers, ...filteredApiOffers]) {
+    const key = item.title.toLowerCase();
+    if (!mergedOfferMap.has(key)) {
+      mergedOfferMap.set(key, item);
+    }
+  }
+
+  const customEvents = loadLocalList<LiveEventItem>(CUSTOM_EVENT_KEY);
+  const apiEventList: LiveEventItem[] = (backendEvents?.items || []).map((e, idx) => {
+    const dKm = Number(e.distance_km ?? 1.8);
+    const mappedCat = mapToFrontendEventCategory(String(e.category || 'Festivals & Fairs'));
+    const att = Number(e.expected_attendance || 0);
+    const startIso = String(e.start_time || '');
+    let dateStr = 'Upcoming';
+    let timeStr = String(e.timing_text || '08:00 AM - 01:00 PM');
+    if (startIso) {
+      try {
+        const dObj = new Date(startIso);
+        if (!isNaN(dObj.getTime())) {
+          dateStr = dObj.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+          if (!e.timing_text) {
+            timeStr = dObj.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+          }
+        }
+      } catch {}
+    }
+    return {
+      id: `api-event-${e.id || idx}`,
+      numericId: Number(e.id || idx + 1),
+      title: String(e.title || 'Neighbourhood Event'),
+      cat: mappedCat,
+      organizer: String(e.organizer || `${localityShort} Community`),
+      date: dateStr,
+      startTimeIso: startIso,
+      time: timeStr,
+      loc: String(e.venue_name || `${localityShort} Community Center`),
+      address: String(e.address || `${localityShort}, ${cityShort}`),
+      locality: String(e.locality || localityShort),
+      city: String(e.city || cityShort),
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      price: mappedCat === 'Festivals & Fairs' || mappedCat === 'Community Events' ? 'Free / Open Observance' : 'Free Entry',
+      free: true,
+      rsvp: att > 0 ? `${att}+ expected` : 'Open Entry',
+      expectedAttendance: att,
+      parkingPressure: (e.parking_pressure as LiveEventItem['parkingPressure']) || 'MODERATE',
+      trafficImpact: (e.arterial_traffic_impact as LiveEventItem['trafficImpact']) || 'MODERATE',
+      exitWeatherAdvisory: String(
+        e.exit_weather_advisory ||
+          `${liveIntel.weather.conditionText} (${liveIntel.weather.temperatureC}°C) expected during dispersal.`
+      ),
+      commuteCorridor: String(
+        e.correlated_commute_route ||
+          liveIntel.traffic.corridors[0]?.roadName ||
+          `${localityShort} Main Arterial`
+      ),
+      source: String(e.source || 'Verified Event Feed'),
+      registrationUrl: e.registration_url ? String(e.registration_url) : undefined,
+      img: pickEventImage(mappedCat, idx),
+      lat: Number(e.latitude || lat + 0.004),
+      lng: Number(e.longitude || lng - 0.003),
+    };
+  });
+
+  const mergedEventMap = new Map<string, LiveEventItem>();
+  for (const item of [...customEvents, ...apiEventList]) {
+    const key = item.title.toLowerCase();
+    if (!mergedEventMap.has(key)) {
+      mergedEventMap.set(key, item);
+    }
+  }
+
+  const apiEmergList: LiveEmergencyFacility[] = (backendEmergency?.facilities || []).map((f, idx) => {
+    const dKm = Number(
+      f.distance_km ?? haversineKm(lat, lng, Number(f.latitude || lat), Number(f.longitude || lng))
+    );
+    return {
+      id: `api-emerg-${f.id || idx}`,
+      name: String(f.name || `${localityShort} Emergency Hospital`),
+      facilityType: mapFacilityType(String(f.facility_type || 'Hospital')),
+      phone: String(f.phone || '108'),
+      address: String(f.address || `${localityShort}, ${cityShort}`),
+      locality: String(f.locality || localityShort),
+      city: String(f.city || cityShort),
+      distanceKm: dKm,
+      is24x7: Boolean(f.is_24_7 ?? true),
+      bloodBankAvailable: Boolean(f.blood_bank_available ?? true),
+      lat: Number(f.latitude || lat + 0.003),
+      lng: Number(f.longitude || lng + 0.003),
+    };
+  });
+
+  const poiEmergList: LiveEmergencyFacility[] = (liveIntel.nearbyPois || [])
+    .filter((p) => p.category === 'hospital' || p.category === 'police' || p.category === 'pharmacy')
+    .map((p) => ({
+      id: `poi-emerg-${p.id}`,
+      name: p.name,
+      facilityType:
+        p.category === 'police'
+          ? 'Police Station'
+          : p.category === 'fire'
+          ? 'Fire Station'
+          : p.category === 'pharmacy'
+          ? 'Pharmacy'
+          : 'Hospital',
+      phone: p.phone || (p.category === 'police' ? '112' : p.category === 'fire' ? '101' : '108'),
+      address: `${p.sublabel} • ${localityShort}, ${cityShort}`,
+      locality: localityShort,
+      city: cityShort,
+      distanceKm: p.distanceKm,
+      is24x7: true,
+      bloodBankAvailable: p.category === 'hospital',
+      lat: p.latitude,
+      lng: p.longitude,
+    }));
+
+  const mergedEmergMap = new Map<string, LiveEmergencyFacility>();
+  for (const item of [...apiEmergList, ...poiEmergList]) {
+    const key = item.name.toLowerCase();
+    if (!mergedEmergMap.has(key)) {
+      mergedEmergMap.set(key, item);
+    }
+  }
+
+  return {
+    businesses: finalBiz,
+    products: finalProds,
+    services: Array.from(mergedSvcMap.values()),
+    offers: Array.from(mergedOfferMap.values()),
+    events: Array.from(mergedEventMap.values()),
+    emergencyFacilities: Array.from(mergedEmergMap.values()).sort((a, b) => a.distanceKm - b.distanceKm),
+  };
+}
+
+export async function searchProductsOnBackend(params: {
+  q?: string;
+  category?: string;
+  pincode?: string;
+  locality?: string;
+  city?: string;
+  userLat?: number;
+  userLon?: number;
+  pageSize?: number;
+}): Promise<LiveProductItem[]> {
+  const qp = new URLSearchParams();
+  if (params.q && params.q.trim()) qp.set('q', params.q.trim());
+  if (params.category && params.category !== 'All') qp.set('category', params.category);
+  if (params.pincode && params.pincode.trim()) qp.set('pincode', params.pincode.trim());
+  if (params.locality) qp.set('locality', params.locality);
+  if (params.city) qp.set('city', params.city);
+  if (params.userLat) qp.set('user_lat', String(params.userLat));
+  if (params.userLon) qp.set('user_lon', String(params.userLon));
+  qp.set('page_size', String(params.pageSize || 30));
+
+  const res = await requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/products?${qp.toString()}`);
+  if (!res?.items) return [];
+
+  return res.items.map((p, idx) => {
+    const bizObj = (p.business as Record<string, unknown>) || {};
+    const localPrice = Number(p.local_price || 120);
+    const onlinePrice = Number(p.online_price || p.mrp || Math.round(localPrice * 1.15));
+    const dKm = Number(bizObj.distance_km ?? 0.8);
+    const mappedCat = mapToFrontendProdCategory(String(p.category || 'Groceries'));
+    const savings = Math.max(0, onlinePrice - localPrice);
+    return {
+      id: `api-prod-${p.id || idx}`,
+      numericId: Number(p.id || idx + 1),
+      name: String(p.name || 'Local Essential'),
+      brand: String(p.brand || 'Verified Local'),
+      cat: mappedCat,
+      price: `₹${localPrice.toLocaleString('en-IN')}`,
+      localPriceNum: localPrice,
+      oldPrice: onlinePrice > localPrice ? `₹${onlinePrice.toLocaleString('en-IN')}` : undefined,
+      onlinePriceNum: onlinePrice,
+      onlineProvider: String(p.online_provider || 'Blinkit / Amazon'),
+      savingsAmount: savings,
+      savingsPercent: onlinePrice > 0 ? Math.round((savings / onlinePrice) * 100) : 0,
+      betterOffline: localPrice <= onlinePrice,
+      unit: '1 unit • In Stock',
+      store: String(bizObj.name || `${params.locality || 'Local'} Store`),
+      storeAddress: String(bizObj.address || `${params.locality || ''}, ${params.city || ''}`),
+      phone: bizObj.phone ? String(bizObj.phone) : '',
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      img: pickProdImage(mappedCat, idx),
+      rating: p.rating ? String(p.rating) : 'New',
+      reviews: p.review_count ? `(${p.review_count})` : '(0)',
+      freshnessLabel: 'Verified Today',
+      businessId: p.business_id ? Number(p.business_id) : undefined,
+    };
+  });
+}
+
+export async function searchBusinessesOnBackend(params: {
+  q?: string;
+  category?: string;
+  pincode?: string;
+  locality?: string;
+  city?: string;
+  userLat?: number;
+  userLon?: number;
+  pageSize?: number;
+}): Promise<LiveBusinessItem[]> {
+  const qp = new URLSearchParams();
+  if (params.q && params.q.trim()) qp.set('q', params.q.trim());
+  if (params.category && params.category !== 'All') qp.set('category', params.category);
+  if (params.pincode && params.pincode.trim()) qp.set('pincode', params.pincode.trim());
+  if (params.locality) qp.set('locality', params.locality);
+  if (params.city) qp.set('city', params.city);
+  if (params.userLat) qp.set('user_lat', String(params.userLat));
+  if (params.userLon) qp.set('user_lon', String(params.userLon));
+  qp.set('page_size', String(params.pageSize || 30));
+
+  const res = await requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/businesses?${qp.toString()}`);
+  if (!res?.items) return [];
+
+  return res.items.map((b, idx) => {
+    const rawCat = String(b.category || 'Restaurants');
+    const mappedCat = mapToFrontendBizCategory(rawCat);
+    const dKm = Number(b.distance_km ?? (params.userLat ? haversineKm(params.userLat, params.userLon || 0, Number(b.latitude || 0), Number(b.longitude || 0)) : 1.0));
+    return {
+      id: `api-biz-${b.id || idx}`,
+      numericId: Number(b.id || idx + 1),
+      slug: String(b.slug || `biz-${idx}`),
+      name: String(b.name || `Local Store`),
+      cat: mappedCat,
+      sub: `${String(b.subcategory || rawCat)} • ${String(b.locality || params.locality || 'Local')}`,
+      description: String(b.description || `Verified merchant`),
+      address: String(b.address || `${params.locality || ''}, ${params.city || ''}`),
+      locality: String(b.locality || params.locality || 'Local'),
+      city: String(b.city || params.city || 'India'),
+      rating: b.rating ? Number(b.rating).toFixed(1) : 'New',
+      reviews: b.review_count ? `(${b.review_count})` : '(0)',
+      dist: formatDist(dKm),
+      distanceKm: dKm,
+      status: b.is_open_now === false ? 'Closed' : 'Open',
+      closes: `Closes ${b.closing_time || '10:00 PM'}`,
+      openingTime: String(b.opening_time || '09:00'),
+      closingTime: String(b.closing_time || '22:00'),
+      phone: b.phone ? String(b.phone) : '',
+      whatsapp: b.whatsapp ? String(b.whatsapp) : (b.phone ? String(b.phone) : ''),
+      img: pickBizImage(mappedCat, idx),
+      verified: Boolean(b.is_verified ?? true),
+      trending: idx < 3,
+      popular: Number(b.rating || 4.6) >= 4.5,
+      lat: Number(b.latitude || 0),
+      lng: Number(b.longitude || 0),
+      activeProductsCount: Number(b.active_products_count || 0),
+      activeOffersCount: Number(b.active_offers_count || 0),
+      source: 'FastAPI /api/v1/businesses',
+    };
+  });
+}
+
 export function useLiveCommunityMarketplace(
   liveIntel: LiveAreaIntelligence
 ): LiveCommunityMarketplaceState {
@@ -689,340 +1432,20 @@ export function useLiveCommunityMarketplace(
     setLoading(true);
 
     async function fetchAllModules() {
-      const qParams = `locality=${encodeURIComponent(localityShort)}&city=${encodeURIComponent(
-        cityShort
-      )}&user_lat=${lat}&user_lon=${lng}`;
-
-      // Parallel fetch from FastAPI endpoints + Overpass commercial POIs
-      const [
-        backendBiz,
-        backendProd,
-        backendSvc,
-        backendOffers,
-        backendEvents,
-        backendEmergency,
-        overpassBiz,
-      ] = await Promise.all([
-        requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/businesses?${qParams}&page_size=24`),
-        requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/products?${qParams}&page_size=24`),
-        requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/services?${qParams}&page_size=20`),
-        requestBackend<{ items: Record<string, unknown>[] }>(`/api/v1/offers?${qParams}&page_size=20`),
-        requestBackend<{ items: Record<string, unknown>[] }>(
-          `/api/v1/events?locality=${encodeURIComponent(localityShort)}&city=${encodeURIComponent(
-            cityShort
-          )}&lat=${lat}&lon=${lng}&page_size=20`
-        ),
-        requestBackend<{ facilities: Record<string, unknown>[] }>(
-          `/api/v1/emergency/facilities?latitude=${lat}&longitude=${lng}&city=${encodeURIComponent(
-            cityShort
-          )}&locality=${encodeURIComponent(localityShort)}`
-        ),
-        fetchOverpassBusinesses(lat, lng, localityShort, cityShort),
-      ]);
-
-      if (cancelled) return;
-
-      // 1. Assemble Businesses (Custom + Backend + Overpass + Locality Baseline)
-      const customBiz = loadLocalList<LiveBusinessItem>(CUSTOM_BIZ_KEY);
-      const apiBizList: LiveBusinessItem[] = (backendBiz?.items || []).map((b, idx) => {
-        const rawCat = String(b.category || 'Restaurants');
-        const mappedCat = mapToFrontendBizCategory(rawCat);
-        const dKm = Number(b.distance_km ?? haversineKm(lat, lng, Number(b.latitude || lat), Number(b.longitude || lng)));
-        return {
-          id: `api-biz-${b.id || idx}`,
-          numericId: Number(b.id || idx + 1),
-          slug: String(b.slug || `biz-${idx}`),
-          name: String(b.name || `${localityShort} Store`),
-          cat: mappedCat,
-          sub: `${String(b.subcategory || rawCat)} • ${String(b.locality || localityShort)}`,
-          description: String(b.description || `Verified merchant in ${localityShort}, ${cityShort}`),
-          address: String(b.address || `${localityShort}, ${cityShort}`),
-          locality: String(b.locality || localityShort),
-          city: String(b.city || cityShort),
-          rating: Number(b.rating || 4.6).toFixed(1),
-          reviews: `(${b.review_count || 140})`,
-          dist: formatDist(dKm),
-          distanceKm: dKm,
-          status: b.is_open_now === false ? 'Closed' : 'Open',
-          closes: `Closes ${b.closing_time || '10:00 PM'}`,
-          openingTime: String(b.opening_time || '09:00'),
-          closingTime: String(b.closing_time || '22:00'),
-          phone: String(b.phone || '+91 98110 24024'),
-          whatsapp: String(b.whatsapp || b.phone || '+91 98110 24024'),
-          img: pickBizImage(mappedCat, idx),
-          verified: Boolean(b.is_verified ?? true),
-          trending: idx < 3,
-          popular: Number(b.rating || 4.6) >= 4.5,
-          lat: Number(b.latitude || lat + 0.002),
-          lng: Number(b.longitude || lng + 0.002),
-          activeProductsCount: Number(b.active_products_count || 4),
-          activeOffersCount: Number(b.active_offers_count || 1),
-          source: 'FastAPI /api/v1/businesses',
-        };
-      });
-
-      const mergedBizMap = new Map<string, LiveBusinessItem>();
-      for (const item of [...customBiz, ...apiBizList, ...overpassBiz]) {
-        const key = item.name.toLowerCase().trim();
-        if (!mergedBizMap.has(key)) {
-          mergedBizMap.set(key, item);
-        }
+      try {
+        const data = await fetchLiveMarketplaceModules(liveIntel);
+        if (cancelled) return;
+        setBusinesses(data.businesses);
+        setProducts(data.products);
+        setServices(data.services);
+        setOffers(data.offers);
+        setEvents(data.events);
+        setEmergencyFacilities(data.emergencyFacilities);
+      } catch (err) {
+        console.error('Failed to load live community marketplace modules:', err);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      // Ensure every category has rich representation in the active locality
-      const fallbackBiz = buildLocalizedBusinesses(lat, lng, localityShort, cityShort);
-      for (const fb of fallbackBiz) {
-        const key = fb.name.toLowerCase().trim();
-        if (!mergedBizMap.has(key)) {
-          mergedBizMap.set(key, fb);
-        }
-      }
-      const finalBiz = Array.from(mergedBizMap.values()).sort((a, b) => a.distanceKm - b.distanceKm);
-      setBusinesses(finalBiz);
-
-      // 2. Assemble Products (Custom + Backend + Grounded in Discovered Local Stores)
-      const customProds = loadLocalList<LiveProductItem>(CUSTOM_PROD_KEY);
-      const apiProdList: LiveProductItem[] = (backendProd?.items || []).map((p, idx) => {
-        const bizObj = (p.business as Record<string, unknown>) || {};
-        const localPrice = Number(p.local_price || 120);
-        const onlinePrice = Number(p.online_price || p.mrp || Math.round(localPrice * 1.15));
-        const dKm = Number(bizObj.distance_km ?? 0.8);
-        const mappedCat = mapToFrontendProdCategory(String(p.category || 'Groceries'));
-        const savings = Math.max(0, onlinePrice - localPrice);
-        return {
-          id: `api-prod-${p.id || idx}`,
-          numericId: Number(p.id || idx + 1),
-          name: String(p.name || 'Local Essential'),
-          brand: String(p.brand || 'Verified Local'),
-          cat: mappedCat,
-          price: `₹${localPrice.toLocaleString('en-IN')}`,
-          localPriceNum: localPrice,
-          oldPrice: onlinePrice > localPrice ? `₹${onlinePrice.toLocaleString('en-IN')}` : undefined,
-          onlinePriceNum: onlinePrice,
-          onlineProvider: String(p.online_provider || 'Blinkit / Amazon'),
-          savingsAmount: savings,
-          savingsPercent: onlinePrice > 0 ? Math.round((savings / onlinePrice) * 100) : 0,
-          betterOffline: localPrice <= onlinePrice,
-          unit: '1 unit • In Stock',
-          store: String(bizObj.name || finalBiz[idx % Math.max(1, finalBiz.length)]?.name || `${localityShort} Supermart`),
-          storeAddress: String(bizObj.address || `${localityShort}, ${cityShort}`),
-          phone: String(bizObj.phone || '+91 98110 24024'),
-          dist: formatDist(dKm),
-          distanceKm: dKm,
-          rating: Number(bizObj.rating || 4.6).toFixed(1),
-          reviews: `(${120 + idx * 19})`,
-          inStock: p.availability_status !== 'out_of_stock',
-          freshnessLabel: String(p.freshness_label || 'Updated 10m ago'),
-          discount: savings > 0 ? `Save ₹${savings}` : undefined,
-          img: pickProdImage(String(p.name || ''), mappedCat, idx),
-          lat: Number(bizObj.latitude || lat + 0.002),
-          lng: Number(bizObj.longitude || lng - 0.002),
-        };
-      });
-
-      const groundedProds = buildLocalizedProducts(lat, lng, localityShort, cityShort, finalBiz, liveIntel.mandiRates);
-      const mergedProdMap = new Map<string, LiveProductItem>();
-      for (const item of [...customProds, ...apiProdList, ...groundedProds]) {
-        const key = `${item.name.toLowerCase()}-${item.store.toLowerCase()}`;
-        if (!mergedProdMap.has(key)) {
-          mergedProdMap.set(key, item);
-        }
-      }
-      setProducts(Array.from(mergedProdMap.values()));
-
-      // 3. Assemble Services (Custom + Backend + Localized Professionals)
-      const customSvcs = loadLocalList<LiveServiceItem>(CUSTOM_SVC_KEY);
-      const apiSvcList: LiveServiceItem[] = (backendSvc?.items || []).map((s, idx) => {
-        const dKm = Number(s.distance_km ?? 0.9);
-        const priceNum = Number(s.price_starting_at || 249);
-        const mappedCat = mapToFrontendSvcCategory(String(s.category || 'Home Repair'));
-        return {
-          id: `api-svc-${s.id || idx}`,
-          numericId: Number(s.id || idx + 1),
-          name: String(s.provider_name || `${localityShort} Service Pro`),
-          cat: mappedCat,
-          role: `${String(s.category || 'Specialist')} • ${localityShort}`,
-          description: String(s.description || `Verified doorstep service across ${localityShort}, ${cityShort}`),
-          exp: `${s.experience_years || 7} yrs exp`,
-          rating: Number(s.rating || 4.8).toFixed(1),
-          reviews: `(${s.review_count || 64})`,
-          dist: formatDist(dKm),
-          distanceKm: dKm,
-          price: `Starts ₹${priceNum}`,
-          priceNum,
-          priceUnit: String(s.price_unit || 'per visit'),
-          avail: 'Available Today',
-          timing: String(s.timing || '08:00 AM - 09:00 PM'),
-          phone: String(s.phone || '+91 98112 44101'),
-          whatsapp: String(s.whatsapp || s.phone || '+91 98112 44101'),
-          verified: Boolean(s.is_verified ?? true),
-          img: pickSvcImage(mappedCat, idx),
-          locality: String(s.locality || localityShort),
-          city: String(s.city || cityShort),
-          lat: Number(s.latitude || lat + 0.002),
-          lng: Number(s.longitude || lng + 0.001),
-        };
-      });
-
-      const groundedSvcs = buildLocalizedServices(lat, lng, localityShort, cityShort);
-      const mergedSvcMap = new Map<string, LiveServiceItem>();
-      for (const item of [...customSvcs, ...apiSvcList, ...groundedSvcs]) {
-        const key = item.name.toLowerCase();
-        if (!mergedSvcMap.has(key)) {
-          mergedSvcMap.set(key, item);
-        }
-      }
-      setServices(Array.from(mergedSvcMap.values()));
-
-      // 4. Assemble Offers (Custom + Backend + Storefront Deals)
-      const customOffers = loadLocalList<LiveOfferItem>(CUSTOM_OFFER_KEY);
-      const apiOfferList: LiveOfferItem[] = (backendOffers?.items || []).map((o, idx) => {
-        const bizObj = (o.business as Record<string, unknown>) || {};
-        const dKm = Number(o.distance_km ?? bizObj.distance_km ?? 0.9);
-        const mappedCat = mapToFrontendOfferCategory(String(o.category || 'Food & Dining'));
-        return {
-          id: `api-offer-${o.id || idx}`,
-          numericId: Number(o.id || idx + 1),
-          title: String(o.title || 'Flat 15% Off In-Store'),
-          sub: String(o.description || `Valid at ${bizObj.name || localityShort}`),
-          description: String(o.description || `Redeemable at counter or via WhatsApp order in ${localityShort}.`),
-          store: String(bizObj.name || `${localityShort} Merchant`),
-          storeAddress: String(bizObj.address || `${localityShort}, ${cityShort}`),
-          phone: String(bizObj.phone || '+91 98110 24024'),
-          cat: mappedCat,
-          badge: String(o.discount_text || '15% OFF'),
-          badgeColor: idx % 2 === 0 ? 'bg-orange-500 text-white' : 'bg-emerald-600 text-white',
-          code: String(o.coupon_code || 'MYAREA15'),
-          valid: `${o.days_left ?? 12} days left`,
-          daysLeft: Number(o.days_left ?? 12),
-          dist: formatDist(dKm),
-          distanceKm: dKm,
-          img: pickOfferImage(mappedCat, idx),
-        };
-      });
-
-      const groundedOffers = buildLocalizedOffers(localityShort, cityShort, finalBiz);
-      const mergedOfferMap = new Map<string, LiveOfferItem>();
-      for (const item of [...customOffers, ...apiOfferList, ...groundedOffers]) {
-        const key = `${item.title.toLowerCase()}-${item.store.toLowerCase()}`;
-        if (!mergedOfferMap.has(key)) {
-          mergedOfferMap.set(key, item);
-        }
-      }
-      setOffers(Array.from(mergedOfferMap.values()));
-
-      // 5. Assemble Events (Custom + Backend /api/v1/events + Localized Civic/Community Events)
-      const customEvents = loadLocalList<LiveEventItem>(CUSTOM_EVENT_KEY);
-      const apiEventList: LiveEventItem[] = (backendEvents?.items || []).map((e, idx) => {
-        const dKm = Number(e.distance_km ?? haversineKm(lat, lng, Number(e.latitude || lat), Number(e.longitude || lng)));
-        const startDt = e.start_time ? new Date(String(e.start_time)) : new Date(Date.now() + (idx + 1) * 86400000);
-        const dateLabel = isNaN(startDt.getTime())
-          ? 'This Weekend'
-          : startDt.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
-        const mappedCat = mapToFrontendEventCategory(String(e.category || 'Community'));
-        const att = Number(e.expected_attendance || 450);
-        return {
-          id: `api-ev-${e.id || idx}`,
-          numericId: Number(e.id || idx + 1),
-          title: String(e.title || `${localityShort} Community Meet`),
-          cat: mappedCat,
-          organizer: String(e.organizer || `${cityShort} Civic Forum`),
-          date: dateLabel,
-          time: String(e.timing_text || '06:00 PM onwards'),
-          loc: `${String(e.venue_name || localityShort)}, ${String(e.locality || localityShort)}`,
-          address: String(e.address || `${localityShort}, ${cityShort}`),
-          locality: String(e.locality || localityShort),
-          city: String(e.city || cityShort),
-          dist: formatDist(dKm),
-          distanceKm: dKm,
-          price: mappedCat === 'Civic & Health' || mappedCat === 'Sports & Fitness' ? 'Free Entry' : 'Free / Open RSVP',
-          free: true,
-          rsvp: `${att}+ expected`,
-          expectedAttendance: att,
-          parkingPressure: (e.parking_pressure as LiveEventItem['parkingPressure']) || 'MODERATE',
-          trafficImpact: (e.arterial_traffic_impact as LiveEventItem['trafficImpact']) || 'MODERATE',
-          exitWeatherAdvisory: String(
-            e.exit_weather_advisory ||
-              `${liveIntel.weather.conditionText} (${liveIntel.weather.temperatureC}°C) expected during dispersal.`
-          ),
-          commuteCorridor: String(
-            e.correlated_commute_route ||
-              liveIntel.traffic.corridors[0]?.roadName ||
-              `${localityShort} Main Arterial`
-          ),
-          source: String(e.source || 'AllEvents.in / Verified Civic Feed'),
-          registrationUrl: e.registration_url ? String(e.registration_url) : undefined,
-          img: pickEventImage(mappedCat, idx),
-          lat: Number(e.latitude || lat + 0.004),
-          lng: Number(e.longitude || lng - 0.003),
-        };
-      });
-
-      const groundedEvents = buildLocalizedEvents(lat, lng, localityShort, cityShort, liveIntel);
-      const mergedEventMap = new Map<string, LiveEventItem>();
-      for (const item of [...customEvents, ...apiEventList, ...groundedEvents]) {
-        const key = item.title.toLowerCase();
-        if (!mergedEventMap.has(key)) {
-          mergedEventMap.set(key, item);
-        }
-      }
-      setEvents(Array.from(mergedEventMap.values()));
-
-      // 6. Assemble Emergency Facilities (/api/v1/emergency/facilities + Overpass liveIntel.nearbyPois)
-      const apiEmergList: LiveEmergencyFacility[] = (backendEmergency?.facilities || []).map((f, idx) => {
-        const dKm = Number(
-          f.distance_km ?? haversineKm(lat, lng, Number(f.latitude || lat), Number(f.longitude || lng))
-        );
-        return {
-          id: `api-emerg-${f.id || idx}`,
-          name: String(f.name || `${localityShort} Emergency Hospital`),
-          facilityType: mapFacilityType(String(f.facility_type || 'Hospital')),
-          phone: String(f.phone || '108'),
-          address: String(f.address || `${localityShort}, ${cityShort}`),
-          locality: String(f.locality || localityShort),
-          city: String(f.city || cityShort),
-          distanceKm: dKm,
-          is24x7: Boolean(f.is_24_7 ?? true),
-          bloodBankAvailable: Boolean(f.blood_bank_available ?? true),
-          lat: Number(f.latitude || lat + 0.003),
-          lng: Number(f.longitude || lng + 0.003),
-        };
-      });
-
-      const poiEmergList: LiveEmergencyFacility[] = liveIntel.nearbyPois
-        .filter((p) => ['hospital', 'police', 'fire', 'pharmacy'].includes(p.category))
-        .map((p) => ({
-          id: `osm-emerg-${p.id}`,
-          name: p.name,
-          facilityType:
-            p.category === 'police'
-              ? 'Police Station'
-              : p.category === 'fire'
-              ? 'Fire Station'
-              : p.category === 'pharmacy'
-              ? 'Pharmacy'
-              : 'Hospital',
-          phone: p.phone || (p.category === 'police' ? '112' : p.category === 'fire' ? '101' : '108'),
-          address: `${p.sublabel} • ${localityShort}, ${cityShort}`,
-          locality: localityShort,
-          city: cityShort,
-          distanceKm: p.distanceKm,
-          is24x7: true,
-          bloodBankAvailable: p.category === 'hospital',
-          lat: p.latitude,
-          lng: p.longitude,
-        }));
-
-      const mergedEmergMap = new Map<string, LiveEmergencyFacility>();
-      for (const item of [...apiEmergList, ...poiEmergList]) {
-        const key = item.name.toLowerCase();
-        if (!mergedEmergMap.has(key)) {
-          mergedEmergMap.set(key, item);
-        }
-      }
-      setEmergencyFacilities(
-        Array.from(mergedEmergMap.values()).sort((a, b) => a.distanceKm - b.distanceKm)
-      );
-      setLoading(false);
     }
 
     fetchAllModules();
@@ -1092,6 +1515,12 @@ export function useLiveCommunityMarketplace(
     const onlineNum = Number(prod.onlinePriceNum || Math.round(localNum * 1.15));
     const savings = Math.max(0, onlineNum - localNum);
     const cat = prod.cat || 'Groceries';
+    const finalImg =
+      prod.img ||
+      (prod as any).image ||
+      (prod as any).image_url ||
+      pickProdImage(prod.name || '', cat, 0);
+
     const created: LiveProductItem = {
       id: `custom-prod-${Date.now()}`,
       name: prod.name || 'Fresh Local Item',
@@ -1116,21 +1545,40 @@ export function useLiveCommunityMarketplace(
       inStock: true,
       freshnessLabel: 'Added just now',
       discount: savings > 0 ? `Save ₹${savings}` : 'Live Price',
-      img: pickProdImage(prod.name || '', cat, 0),
+      img: finalImg,
       lat: lat + 0.001,
       lng: lng - 0.001,
     };
 
+    const resolvedBizId = (() => {
+      if (prod.businessId) {
+        const num = typeof prod.businessId === 'number' ? prod.businessId : parseInt(String(prod.businessId).replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num > 0) return num;
+      }
+      if (prod.store) {
+        const matched = businesses.find((b) => b.name.trim().toLowerCase() === prod.store!.trim().toLowerCase());
+        if (matched?.numericId) return matched.numericId;
+      }
+      const session = getStoredMerchantSession();
+      if (session?.id) {
+        const num = parseInt(session.id.replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num > 0) return num;
+      }
+      return businesses[0]?.numericId || 1;
+    })();
+
     await requestBackend('/api/v1/products', {
       method: 'POST',
       body: JSON.stringify({
-        business_id: 1,
+        business_id: resolvedBizId,
         name: created.name,
         brand: created.brand,
         category: created.cat,
         local_price: localNum,
         online_price: onlineNum,
         availability_status: 'in_stock',
+        image_url: finalImg,
+        image: finalImg,
       }),
     });
 
@@ -1143,6 +1591,12 @@ export function useLiveCommunityMarketplace(
   const addService = async (svc: Partial<LiveServiceItem>): Promise<LiveServiceItem> => {
     const priceNum = Number(svc.priceNum || 299);
     const cat = svc.cat || 'Home Repair';
+    const finalSvcImg =
+      svc.img ||
+      (svc as any).image ||
+      (svc as any).image_url ||
+      pickSvcImage(cat, 0);
+
     const created: LiveServiceItem = {
       id: `custom-svc-${Date.now()}`,
       name: svc.name || `${localityShort} Verified Specialist`,
@@ -1162,7 +1616,7 @@ export function useLiveCommunityMarketplace(
       phone: svc.phone || '+91 98112 44101',
       whatsapp: svc.phone || '+91 98112 44101',
       verified: true,
-      img: pickSvcImage(cat, 0),
+      img: finalSvcImg,
       locality: localityShort,
       city: cityShort,
       lat: lat + 0.002,
@@ -1182,6 +1636,8 @@ export function useLiveCommunityMarketplace(
         longitude: created.lng,
         phone: created.phone,
         price_starting_at: priceNum,
+        image_url: finalSvcImg,
+        image: finalSvcImg,
       }),
     });
 
@@ -1193,6 +1649,13 @@ export function useLiveCommunityMarketplace(
 
   const addOffer = async (offer: Partial<LiveOfferItem>): Promise<LiveOfferItem> => {
     const cat = offer.cat || 'Food & Dining';
+    const finalOfferImg =
+      offer.img ||
+      (offer as any).image ||
+      (offer as any).image_url ||
+      (offer as any).banner_image_url ||
+      pickOfferImage(cat, 0);
+
     const created: LiveOfferItem = {
       id: `custom-offer-${Date.now()}`,
       title: offer.title || 'Flat 20% Off Walk-In Deal',
@@ -1209,19 +1672,41 @@ export function useLiveCommunityMarketplace(
       daysLeft: 14,
       dist: '0.4 km',
       distanceKm: 0.4,
-      img: pickOfferImage(cat, 0),
+      img: finalOfferImg,
+      lat: lat + 0.001,
+      lng: lng - 0.001,
     };
+
+    const resolvedBizId = (() => {
+      if (offer.businessId) {
+        const num = typeof offer.businessId === 'number' ? offer.businessId : parseInt(String(offer.businessId).replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num > 0) return num;
+      }
+      if (offer.store) {
+        const matched = businesses.find((b) => b.name.trim().toLowerCase() === offer.store!.trim().toLowerCase());
+        if (matched?.numericId) return matched.numericId;
+      }
+      const session = getStoredMerchantSession();
+      if (session?.id) {
+        const num = parseInt(session.id.replace(/\D/g, ''), 10);
+        if (!isNaN(num) && num > 0) return num;
+      }
+      return businesses[0]?.numericId || 1;
+    })();
 
     await requestBackend('/api/v1/offers', {
       method: 'POST',
       body: JSON.stringify({
-        business_id: 1,
+        business_id: resolvedBizId,
         title: created.title,
         description: created.sub,
         discount_text: created.badge,
         coupon_code: created.code,
         category: created.cat,
         valid_days: 14,
+        banner_image_url: finalOfferImg,
+        image_url: finalOfferImg,
+        image: finalOfferImg,
       }),
     });
 
@@ -1348,7 +1833,7 @@ async function fetchOverpassBusinesses(
           (b.distance_km ?? haversineKm(lat, lng, b.latitude || lat, b.longitude || lng)).toFixed(2)
         );
         const street = b.locality || locality;
-        const phone = b.phone || '+91 98110 24024';
+        const phone = b.phone || '';
 
         return {
           id: `osm-biz-${b.id || idx}`,
@@ -1360,8 +1845,8 @@ async function fetchOverpassBusinesses(
           address: b.address || `${street}, ${locality}, ${city}`,
           locality: b.locality || locality,
           city: b.city || city,
-          rating: String(b.rating || (4.3 + ((idx * 3) % 7) * 0.1).toFixed(1)),
-          reviews: String(b.reviews || `(${85 + idx * 34})`),
+          rating: b.rating ? String(b.rating) : 'New',
+          reviews: b.reviews ? String(b.reviews) : '(0)',
           dist: formatDist(dKm),
           distanceKm: dKm,
           status: 'Open' as const,
@@ -1376,8 +1861,8 @@ async function fetchOverpassBusinesses(
           popular: true,
           lat: b.latitude || lat,
           lng: b.longitude || lng,
-          activeProductsCount: 5,
-          activeOffersCount: 1,
+          activeProductsCount: 0,
+          activeOffersCount: 0,
           source: 'FastAPI /api/v1/locations/places-nearby',
         };
       });
@@ -1396,7 +1881,7 @@ async function fetchOverpassBusinesses(
               ? 'Pharmacies'
               : 'Groceries';
           const dKm = Number(p.distanceKm.toFixed(2));
-          const phone = p.phone || '+91 98110 24024';
+          const phone = p.phone || '';
           return {
             id: `osm-poi-${p.id || idx}`,
             slug: `osm-poi-${p.id || idx}`,
@@ -1407,8 +1892,8 @@ async function fetchOverpassBusinesses(
             address: p.address || `${locality}, ${city}`,
             locality,
             city,
-            rating: (4.3 + ((idx * 3) % 7) * 0.1).toFixed(1),
-            reviews: `(${85 + idx * 34})`,
+            rating: 'New',
+            reviews: '(0)',
             dist: formatDist(dKm),
             distanceKm: dKm,
             status: 'Open' as const,
@@ -1452,14 +1937,15 @@ function mapOsmTagToCategory(tag: string): string {
 
 function mapToFrontendBizCategory(raw: string): string {
   const r = raw.toLowerCase();
-  if (r.includes('grocery') || r.includes('supermarket')) return 'Groceries';
-  if (r.includes('pharmacy') || r.includes('wellness') || r.includes('medical')) return 'Pharmacies';
-  if (r.includes('electronic') || r.includes('mobile')) return 'Electronics';
-  if (r.includes('cafe') || r.includes('bakery')) return 'Cafés';
-  if (r.includes('restaurant') || r.includes('food')) return 'Restaurants';
-  if (r.includes('salon') || r.includes('fashion')) return 'Salons';
-  if (r.includes('fit') || r.includes('sport') || r.includes('gym')) return 'Fitness';
-  return 'Services';
+  if (r.includes('pharmacy') || r.includes('wellness') || r.includes('medical') || r.includes('chemist') || r.includes('drug') || r.includes('health') || r.includes('hospital')) return 'Pharmacies';
+  if (r.includes('grocery') || r.includes('supermarket') || r.includes('kirana') || r.includes('provision') || r.includes('store') || r.includes('market') || r.includes('bazaar') || r.includes('dairy') || r.includes('general')) return 'Groceries';
+  if (r.includes('electronic') || r.includes('mobile') || r.includes('computer') || r.includes('tech') || r.includes('appliance')) return 'Electronics';
+  if (r.includes('cafe') || r.includes('bakery') || r.includes('coffee') || r.includes('tea') || r.includes('chai') || r.includes('snack')) return 'Cafés';
+  if (r.includes('restaurant') || r.includes('food') || r.includes('dining') || r.includes('sweet') || r.includes('hotel') || r.includes('dhaba')) return 'Restaurants';
+  if (r.includes('salon') || r.includes('fashion') || r.includes('beauty') || r.includes('spa') || r.includes('parlour') || r.includes('barber')) return 'Salons';
+  if (r.includes('fit') || r.includes('sport') || r.includes('gym') || r.includes('yoga')) return 'Fitness';
+  if (r.includes('repair') || r.includes('plumb') || r.includes('electric') || r.includes('clean') || r.includes('service')) return 'Services';
+  return 'Groceries';
 }
 
 function mapToFrontendProdCategory(raw: string): string {
@@ -1493,16 +1979,38 @@ function mapToFrontendOfferCategory(raw: string): string {
 }
 
 function mapToFrontendEventCategory(raw: string): string {
-  const r = raw.toLowerCase();
-  if (r.includes('sport') || r.includes('marathon') || r.includes('fitness')) return 'Sports & Fitness';
-  if (r.includes('market') || r.includes('haat') || r.includes('flea') || r.includes('food'))
-    return 'Food & Markets';
-  if (r.includes('workshop') || r.includes('tech') || r.includes('meetup') || r.includes('ai'))
-    return 'Workshops';
-  if (r.includes('music') || r.includes('concert') || r.includes('comedy') || r.includes('culture'))
-    return 'Music & Arts';
-  if (r.includes('civic') || r.includes('camp') || r.includes('health')) return 'Civic & Health';
-  return 'Community';
+  const r = (raw || '').toLowerCase();
+  if (r.includes('hackathon') || r.includes('quiz') || r.includes('competition') || r.includes('contest') || r.includes('challenge') || r.includes('coding') || r.includes('case study')) {
+    return 'Hackathons & Contests';
+  }
+  if (r.includes('festival') || r.includes('fair') || r.includes('panchang') || r.includes('puja') || r.includes('vrat') || r.includes('utsav') || r.includes('diwali') || r.includes('ekadashi')) {
+    return 'Festivals & Fairs';
+  }
+  if (r.includes('movie') || r.includes('cinema') || r.includes('film') || r.includes('iffi') || r.includes('screening')) {
+    return 'Movies & Cinema Announcements';
+  }
+  if (r.includes('theatre') || r.includes('theater') || r.includes('drama') || r.includes('play') || r.includes('natak')) {
+    return 'Theatre & Drama';
+  }
+  if (r.includes('concert') || r.includes('music') || r.includes('acoustic') || r.includes('sufi') || r.includes('band') || r.includes('live gig') || r.includes('candlelight')) {
+    return 'Concerts & Music';
+  }
+  if (r.includes('comedy') || r.includes('stand-up') || r.includes('standup') || r.includes('open mic') || r.includes('laugh')) {
+    return 'Comedy Shows';
+  }
+  if (r.includes('exhibition') || r.includes('expo') || r.includes('gallery') || r.includes('craft') || r.includes('showcase')) {
+    return 'Exhibitions';
+  }
+  if (r.includes('college') || r.includes('fest') || r.includes('workshop') || r.includes('campus') || r.includes('bootcamp') || r.includes('training') || r.includes('conference')) {
+    return 'College Fests & Workshops';
+  }
+  if (r.includes('sport') || r.includes('marathon') || r.includes('cricket') || r.includes('football') || r.includes('fitness') || r.includes('yoga') || r.includes('cyclothon')) {
+    return 'Sports & Public Activities';
+  }
+  if (r.includes('family') || r.includes('kids') || r.includes('magic') || r.includes('carnival') || r.includes('circus') || r.includes('amusement') || r.includes('children')) {
+    return 'Family Entertainment';
+  }
+  return 'Community Events';
 }
 
 function mapFacilityType(raw: string): LiveEmergencyFacility['facilityType'] {
@@ -1561,10 +2069,15 @@ function pickOfferImage(cat: string, idx: number): string {
 }
 
 function pickEventImage(cat: string, idx: number): string {
-  if (cat === 'Sports & Fitness') return './assets/crops/evt-yoga.webp';
-  if (cat === 'Food & Markets') return './assets/crops/evt-food-carnival.webp';
-  if (cat === 'Workshops') return './assets/crops/evt-techtalk.webp';
-  if (cat === 'Music & Arts') return './assets/crops/evt-music-fest.webp';
+  if (cat === 'Hackathons & Contests') return './assets/crops/evt-techtalk.webp';
+  if (cat === 'Sports & Public Activities') return './assets/crops/evt-yoga.webp';
+  if (cat === 'Festivals & Fairs') return './assets/crops/evt-food-carnival.webp';
+  if (cat === 'College Fests & Workshops') return './assets/crops/evt-techtalk.webp';
+  if (cat === 'Concerts & Music') return './assets/crops/evt-music-fest.webp';
+  if (cat === 'Comedy Shows') return './assets/crops/event-comedy.webp';
+  if (cat === 'Exhibitions') return './assets/crops/evt-art-exhib.webp';
+  if (cat === 'Movies & Cinema Announcements' || cat === 'Theatre & Drama') return './assets/crops/event-summer-fest.webp';
+  if (cat === 'Family Entertainment') return './assets/crops/event-summer-fest.webp';
   const pool = [
     './assets/crops/event-summer-fest.webp',
     './assets/crops/event-cleanup.webp',
@@ -1572,601 +2085,6 @@ function pickEventImage(cat: string, idx: number): string {
     './assets/crops/evt-art-exhib.webp',
   ];
   return pool[idx % pool.length];
-}
-
-function buildLocalizedBusinesses(
-  lat: number,
-  lng: number,
-  locality: string,
-  city: string
-): LiveBusinessItem[] {
-  const loc = locality || 'Neighbourhood';
-  const c = city || 'Delhi';
-  return [
-    {
-      id: 'loc-biz-1',
-      numericId: 101,
-      slug: 'apna-kirana-supermart',
-      name: `${loc} Kirana & Supermart`,
-      cat: 'Groceries',
-      sub: `Daily Essentials • In ${loc}`,
-      description: `Verified neighbourhood grocery and daily essentials store in ${loc}, ${c}. Same-day local fulfillment.`,
-      address: `Shop 4, Market Complex, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.8',
-      reviews: '(240)',
-      dist: '300 m',
-      distanceKm: 0.3,
-      status: 'Open',
-      closes: 'Closes 10:30 PM',
-      openingTime: '07:30',
-      closingTime: '22:30',
-      phone: '+91 98110 24001',
-      whatsapp: '+91 98110 24001',
-      img: './assets/crops/store-apna-mart.webp',
-      verified: true,
-      trending: true,
-      popular: true,
-      lat: lat + 0.0015,
-      lng: lng + 0.0018,
-      activeProductsCount: 8,
-      activeOffersCount: 2,
-      source: 'Verified Local Storefront',
-    },
-    {
-      id: 'loc-biz-2',
-      numericId: 102,
-      slug: 'the-daily-brew-cafe',
-      name: `The Daily Brew Café (${loc})`,
-      cat: 'Cafés',
-      sub: `Artisan Coffee & Snacks • ${loc}`,
-      description: `Speciality manual brews, fresh sourdough toasts and quiet work ambience in ${loc}.`,
-      address: `Ground Floor, Galleria Lane, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.7',
-      reviews: '(182)',
-      dist: '550 m',
-      distanceKm: 0.55,
-      status: 'Open',
-      closes: 'Closes 11:00 PM',
-      openingTime: '08:00',
-      closingTime: '23:00',
-      phone: '+91 98110 24002',
-      whatsapp: '+91 98110 24002',
-      img: './assets/crops/biz-card-chai.webp',
-      verified: true,
-      trending: true,
-      popular: true,
-      lat: lat - 0.002,
-      lng: lng + 0.0025,
-      activeProductsCount: 6,
-      activeOffersCount: 1,
-      source: 'Verified Local Storefront',
-    },
-    {
-      id: 'loc-biz-3',
-      numericId: 103,
-      slug: 'apollo-medico-247',
-      name: `${loc} 24x7 Medico & Pharmacy`,
-      cat: 'Pharmacies',
-      sub: `Prescription & OTC • 24x7 Open`,
-      description: `Round-the-clock emergency pharmacy, diagnostics pickup, and critical care essentials.`,
-      address: `Main Road Crossing, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.9',
-      reviews: '(310)',
-      dist: '400 m',
-      distanceKm: 0.4,
-      status: 'Open',
-      closes: 'Open 24 Hours',
-      openingTime: '00:00',
-      closingTime: '23:59',
-      phone: '+91 98110 24003',
-      whatsapp: '+91 98110 24003',
-      img: './assets/crops/store-medplus.webp',
-      verified: true,
-      trending: false,
-      popular: true,
-      lat: lat + 0.0025,
-      lng: lng - 0.002,
-      activeProductsCount: 5,
-      activeOffersCount: 1,
-      source: 'Verified Local Storefront',
-    },
-    {
-      id: 'loc-biz-4',
-      numericId: 104,
-      slug: 'bikanervala-express',
-      name: `Bikanervala Sweets & Chaat (${loc})`,
-      cat: 'Restaurants',
-      sub: `North Indian & Mithai • ${loc}`,
-      description: `Fresh traditional Indian sweets, kachori, samosas and pure vegetarian family dining.`,
-      address: `Plot 12, Community Centre, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.6',
-      reviews: '(420)',
-      dist: '700 m',
-      distanceKm: 0.7,
-      status: 'Open',
-      closes: 'Closes 10:30 PM',
-      openingTime: '09:00',
-      closingTime: '22:30',
-      phone: '+91 98110 24004',
-      whatsapp: '+91 98110 24004',
-      img: './assets/crops/biz-card-bikanervala.webp',
-      verified: true,
-      trending: false,
-      popular: true,
-      lat: lat - 0.003,
-      lng: lng - 0.0015,
-      activeProductsCount: 4,
-      activeOffersCount: 1,
-      source: 'Verified Local Storefront',
-    },
-    {
-      id: 'loc-biz-5',
-      numericId: 105,
-      slug: 'cultfit-gym-studio',
-      name: `Cult.fit / Iron Arena (${loc})`,
-      cat: 'Fitness',
-      sub: `Strength & CrossFit • ${loc}`,
-      description: `Fully equipped gym with certified trainers, group strength workouts and cardio zones.`,
-      address: `2nd Floor, Apex Plaza, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.8',
-      reviews: '(195)',
-      dist: '850 m',
-      distanceKm: 0.85,
-      status: 'Open',
-      closes: 'Closes 10:00 PM',
-      openingTime: '06:00',
-      closingTime: '22:00',
-      phone: '+91 98110 24005',
-      whatsapp: '+91 98110 24005',
-      img: './assets/crops/biz-card-cultfit.webp',
-      verified: true,
-      trending: false,
-      popular: true,
-      lat: lat + 0.004,
-      lng: lng + 0.003,
-      activeProductsCount: 2,
-      activeOffersCount: 1,
-      source: 'Verified Local Storefront',
-    },
-    {
-      id: 'loc-biz-6',
-      numericId: 106,
-      slug: 'looks-salon-grooming',
-      name: `Looks Salon & Spa (${loc})`,
-      cat: 'Salons',
-      sub: `Hair & Skincare • ${loc}`,
-      description: `Premium unisex hair styling, bridal grooming, facial treatments and relaxing head massage.`,
-      address: `Shop 18, Central Arcade, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      rating: '4.7',
-      reviews: '(164)',
-      dist: '600 m',
-      distanceKm: 0.6,
-      status: 'Open',
-      closes: 'Closes 09:30 PM',
-      openingTime: '10:00',
-      closingTime: '21:30',
-      phone: '+91 98110 24006',
-      whatsapp: '+91 98110 24006',
-      img: './assets/crops/biz-card-looks.webp',
-      verified: true,
-      trending: false,
-      popular: true,
-      lat: lat - 0.0015,
-      lng: lng - 0.0035,
-      activeProductsCount: 3,
-      activeOffersCount: 1,
-      source: 'Verified Local Storefront',
-    },
-  ];
-}
-
-function buildLocalizedProducts(
-  lat: number,
-  lng: number,
-  locality: string,
-  city: string,
-  bizList: LiveBusinessItem[],
-  _mandiRates: LiveAreaIntelligence['mandiRates']
-): LiveProductItem[] {
-  const loc = locality || 'Neighbourhood';
-  const c = city || 'Delhi';
-  const storeName = bizList[0]?.name || `${loc} Kirana & Supermart`;
-  const storeAddr = bizList[0]?.address || `${loc}, ${c}`;
-
-  const catalog = [
-    {
-      name: 'Amul Taaza Homogenised Toned Milk',
-      brand: 'Amul',
-      cat: 'Dairy',
-      localPrice: 54,
-      onlinePrice: 58,
-      onlineProvider: 'Blinkit',
-      unit: '1 Litre Pouch',
-      img: './assets/crops/prod-amul-milk.webp',
-    },
-    {
-      name: 'Fortune Sunlite Refined Sunflower Oil',
-      brand: 'Fortune',
-      cat: 'Groceries',
-      localPrice: 142,
-      onlinePrice: 158,
-      onlineProvider: 'Zepto',
-      unit: '1 Litre Pouch',
-      img: './assets/crops/prod-arhar-dal.webp',
-    },
-    {
-      name: 'India Gate Feast Rozzana Basmati Rice',
-      brand: 'India Gate',
-      cat: 'Groceries',
-      localPrice: 380,
-      onlinePrice: 425,
-      onlineProvider: 'Amazon Fresh',
-      unit: '5 kg Bag',
-      img: './assets/crops/prod-atta.webp',
-    },
-    {
-      name: 'Aashirvaad Superior MP Sharbati Atta',
-      brand: 'Aashirvaad',
-      cat: 'Groceries',
-      localPrice: 460,
-      onlinePrice: 495,
-      onlineProvider: 'Instamart',
-      unit: '10 kg Bag',
-      img: './assets/crops/prod-atta.webp',
-    },
-    {
-      name: 'Farm Fresh Desi Eggs (Pack of 6)',
-      brand: 'Poultry Fresh',
-      cat: 'Dairy',
-      localPrice: 45,
-      onlinePrice: 54,
-      onlineProvider: 'Blinkit',
-      unit: '6 Pieces Carton',
-      img: './assets/crops/prod-banana.webp',
-    },
-    {
-      name: 'Tata Salt Vacuum Evaporated Iodized',
-      brand: 'Tata',
-      cat: 'Groceries',
-      localPrice: 28,
-      onlinePrice: 30,
-      onlineProvider: 'Blinkit',
-      unit: '1 kg Pack',
-      img: './assets/crops/prod-dettol.webp',
-    },
-    {
-      name: 'Surf Excel Matic Front Load Detergent',
-      brand: 'Surf Excel',
-      cat: 'Household',
-      localPrice: 385,
-      onlinePrice: 410,
-      onlineProvider: 'Zepto',
-      unit: '2 kg Pack',
-      img: './assets/crops/prod-arhar-dal.webp',
-    },
-    {
-      name: 'Brooke Bond Red Label Natural Care Tea',
-      brand: 'Red Label',
-      cat: 'Beverages',
-      localPrice: 235,
-      onlinePrice: 255,
-      onlineProvider: 'Blinkit',
-      unit: '500g Carton',
-      img: './assets/crops/prod-amul-milk.webp',
-    },
-  ];
-
-  return catalog.map((item, idx) => {
-    const savings = Math.max(0, item.onlinePrice - item.localPrice);
-    const savingsPercent = Math.round((savings / item.onlinePrice) * 100);
-    return {
-      id: `loc-prod-${idx + 1}`,
-      numericId: 201 + idx,
-      name: item.name,
-      brand: item.brand,
-      cat: item.cat,
-      price: `₹${item.localPrice}`,
-      localPriceNum: item.localPrice,
-      oldPrice: `₹${item.onlinePrice}`,
-      onlinePriceNum: item.onlinePrice,
-      onlineProvider: item.onlineProvider,
-      savingsAmount: savings,
-      savingsPercent,
-      betterOffline: true,
-      unit: item.unit,
-      store: storeName,
-      storeAddress: storeAddr,
-      phone: '+91 98110 24001',
-      dist: '300 m',
-      distanceKm: 0.3,
-      rating: '4.8',
-      reviews: `(${150 + idx * 18})`,
-      inStock: true,
-      freshnessLabel: 'Stock updated today',
-      discount: savings > 0 ? `Save ₹${savings} (${savingsPercent}%)` : undefined,
-      img: item.img,
-      lat: lat + 0.0015,
-      lng: lng + 0.0018,
-    };
-  });
-}
-
-function buildLocalizedServices(
-  lat: number,
-  lng: number,
-  locality: string,
-  city: string
-): LiveServiceItem[] {
-  const loc = locality || 'Neighbourhood';
-  const c = city || 'Delhi';
-
-  const services = [
-    {
-      name: 'Fast Doorstep Electrician Pro',
-      cat: 'Electrical',
-      role: `Licensed Electrician • ${loc}`,
-      description: `Short circuits, MCB repair, inverter wiring and fan/appliance installations across ${loc}.`,
-      exp: '9 yrs exp',
-      priceNum: 199,
-      img: './assets/crops/srv-electrician.webp',
-      phone: '+91 98110 24011',
-    },
-    {
-      name: 'Leakage & Pipe Repair Master Plumber',
-      cat: 'Plumbing',
-      role: `Sanitary & Water Works • ${loc}`,
-      description: `Tap leakage, pipeline blockages, bathroom fittings and motor pumps serviced in 30 mins.`,
-      exp: '12 yrs exp',
-      priceNum: 249,
-      img: './assets/crops/srv-plumbing.webp',
-      phone: '+91 98110 24012',
-    },
-    {
-      name: 'Split & Window AC Servicing Specialist',
-      cat: 'Appliance',
-      role: `HVAC & Cooling Expert • ${loc}`,
-      description: `Foam wash, gas leak detection, cooling optimization and compressor checks with 30-day warranty.`,
-      exp: '8 yrs exp',
-      priceNum: 449,
-      img: './assets/crops/srv-ac-repair.webp',
-      phone: '+91 98110 24013',
-    },
-    {
-      name: 'Urban Home & Kitchen Deep Cleaning',
-      cat: 'Cleaning',
-      role: `Sanitization Pro • ${loc}`,
-      description: `Deep scrub kitchen degreasing, bathroom descaling, balcony cleaning and floor scrubbing.`,
-      exp: '6 yrs exp',
-      priceNum: 799,
-      img: './assets/crops/srv-cleaning.webp',
-      phone: '+91 98110 24014',
-    },
-    {
-      name: 'Doorstep Express Carpenter',
-      cat: 'Home Repair',
-      role: `Furniture & Woodwork • ${loc}`,
-      description: `Door locks, hinges repair, wardrobe sliding fixes and custom furniture modifications.`,
-      exp: '14 yrs exp',
-      priceNum: 299,
-      img: './assets/crops/srv-cleaning.webp',
-      phone: '+91 98110 24015',
-    },
-    {
-      name: 'At-Home Salon & Grooming Expert',
-      cat: 'Salon',
-      role: `Unisex Grooming Stylist • ${loc}`,
-      description: `Hygienic single-use kits for haircut, beard styling, facial cleanup and waxing at your doorstep.`,
-      exp: '7 yrs exp',
-      priceNum: 349,
-      img: './assets/crops/biz-card-looks.webp',
-      phone: '+91 98110 24016',
-    },
-  ];
-
-  return services.map((s, idx) => ({
-    id: `loc-svc-${idx + 1}`,
-    numericId: 301 + idx,
-    name: s.name,
-    cat: s.cat,
-    role: s.role,
-    description: s.description,
-    exp: s.exp,
-    rating: '4.8',
-    reviews: `(${85 + idx * 12})`,
-    dist: `${350 + idx * 150} m`,
-    distanceKm: 0.35 + idx * 0.15,
-    price: `Starts ₹${s.priceNum}`,
-    priceNum: s.priceNum,
-    priceUnit: 'per visit',
-    avail: 'Available Today',
-    timing: '08:00 AM - 08:00 PM',
-    phone: s.phone,
-    whatsapp: s.phone,
-    verified: true,
-    img: s.img,
-    locality: loc,
-    city: c,
-    lat: lat + (idx % 2 === 0 ? 0.002 : -0.002),
-    lng: lng + (idx % 2 === 0 ? -0.002 : 0.002),
-  }));
-}
-
-function buildLocalizedOffers(
-  locality: string,
-  city: string,
-  businesses: LiveBusinessItem[] = []
-): LiveOfferItem[] {
-  const loc = locality || 'Neighbourhood';
-  const c = city || 'Delhi';
-  const b1 = businesses[0]?.name || `${loc} Kirana & Supermart`;
-  const b2 = businesses[1]?.name || `The Daily Brew Café (${loc})`;
-
-  return [
-    {
-      id: 'loc-off-1',
-      numericId: 401,
-      title: 'FLAT 20% OFF on Fresh Vegetables',
-      sub: `Direct farm-to-door fresh harvest in ${loc}`,
-      description: `Valid on all seasonal vegetables with minimum bill of ₹200. Show coupon at checkout.`,
-      store: b1,
-      storeAddress: `${loc}, ${c}`,
-      phone: '+91 98110 24001',
-      cat: 'Groceries',
-      badge: '20% OFF',
-      badgeColor: 'bg-emerald-600',
-      code: 'SABZI20',
-      valid: 'Valid for next 3 days',
-      daysLeft: 3,
-      dist: '300 m',
-      distanceKm: 0.3,
-      img: './assets/crops/offer-dmart.webp',
-    },
-    {
-      id: 'loc-off-2',
-      numericId: 402,
-      title: 'Buy 1 Get 1 Free on Artisan Cappuccino',
-      sub: `Weekday Coffee Treat at ${b2}`,
-      description: `Buy any large manual brew or latte and get the second beverage free between 3 PM and 7 PM.`,
-      store: b2,
-      storeAddress: `${loc}, ${c}`,
-      phone: '+91 98110 24002',
-      cat: 'Cafés',
-      badge: 'BOGO FREE',
-      badgeColor: 'bg-amber-600',
-      code: 'BREW24',
-      valid: 'Valid for next 5 days',
-      daysLeft: 5,
-      dist: '550 m',
-      distanceKm: 0.55,
-      img: './assets/crops/offer-chaayos.webp',
-    },
-    {
-      id: 'loc-off-3',
-      numericId: 403,
-      title: '₹150 OFF on AC Deep Servicing',
-      sub: `Beat the Heat with Verified Doorstep HVAC Care`,
-      description: `Applicable on complete split AC jet wash with gas pressure inspection across ${loc}.`,
-      store: `CoolCare Services (${loc})`,
-      storeAddress: `${loc}, ${c}`,
-      phone: '+91 98110 24013',
-      cat: 'Services',
-      badge: '₹150 OFF',
-      badgeColor: 'bg-blue-600',
-      code: 'CHILL150',
-      valid: 'Valid for next 4 days',
-      daysLeft: 4,
-      dist: '450 m',
-      distanceKm: 0.45,
-      img: './assets/crops/offer-urban-company.webp',
-    },
-  ];
-}
-
-function buildLocalizedEvents(
-  lat: number,
-  lng: number,
-  locality: string,
-  city: string,
-  _liveIntel: LiveAreaIntelligence
-): LiveEventItem[] {
-  const loc = locality || 'Neighbourhood';
-  const c = city || 'Delhi';
-
-  return [
-    {
-      id: 'loc-evt-1',
-      numericId: 501,
-      title: `${loc} Organic Farmers Market & Craft Fair`,
-      cat: 'Food & Markets',
-      organizer: `${loc} Residents Welfare Association`,
-      date: 'This Sunday',
-      time: '08:00 AM – 01:00 PM',
-      loc: `Central Park Amphitheatre, ${loc}`,
-      address: `Sector Park Lawn, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      dist: '400 m',
-      distanceKm: 0.4,
-      price: 'Free Entry',
-      free: true,
-      rsvp: '142 Attending',
-      expectedAttendance: 250,
-      parkingPressure: 'LOW',
-      trafficImpact: 'LOW',
-      exitWeatherAdvisory: 'Pleasant morning weather. Outdoor friendly.',
-      commuteCorridor: `${loc} Main Road (Clear flow)`,
-      source: 'Verified Community Board',
-      img: './assets/crops/evt-food-carnival.webp',
-      lat: lat + 0.003,
-      lng: lng + 0.002,
-    },
-    {
-      id: 'loc-evt-2',
-      numericId: 502,
-      title: `Stand-up Comedy & Acoustic Night`,
-      cat: 'Music & Arts',
-      organizer: `The Daily Brew Café`,
-      date: 'Saturday 7:30 PM',
-      time: '07:30 PM – 10:00 PM',
-      loc: `Galleria Rooftop, ${loc}`,
-      address: `Galleria Lane, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      dist: '550 m',
-      distanceKm: 0.55,
-      price: '₹299 Entry (Includes Beverage)',
-      free: false,
-      rsvp: '88 Attending',
-      expectedAttendance: 120,
-      parkingPressure: 'MODERATE',
-      trafficImpact: 'LOW',
-      exitWeatherAdvisory: 'Dry evening corridor conditions.',
-      commuteCorridor: 'Sector Arterial Road',
-      source: 'Verified Community Board',
-      img: './assets/crops/event-comedy.webp',
-      lat: lat - 0.002,
-      lng: lng + 0.0025,
-    },
-    {
-      id: 'loc-evt-3',
-      numericId: 503,
-      title: `Neighbourhood Green Drive & Tree Plantation`,
-      cat: 'Sports & Fitness',
-      organizer: `MyArea24 Eco Club & Municipal Ward`,
-      date: 'Upcoming Saturday',
-      time: '07:00 AM – 09:30 AM',
-      loc: `Municipal Woodland Trail, ${loc}`,
-      address: `Near Canal Road, ${loc}, ${c}`,
-      locality: loc,
-      city: c,
-      dist: '750 m',
-      distanceKm: 0.75,
-      price: 'Free Community Event',
-      free: true,
-      rsvp: '190 Attending',
-      expectedAttendance: 300,
-      parkingPressure: 'LOW',
-      trafficImpact: 'LOW',
-      exitWeatherAdvisory: 'High AQI recovery drive. Saplings provided free.',
-      commuteCorridor: 'Canal Road (Free Flow)',
-      source: 'Verified Community Board',
-      img: './assets/crops/event-cleanup.webp',
-      lat: lat + 0.004,
-      lng: lng - 0.003,
-    },
-  ];
 }
 
 /* ============================================================================

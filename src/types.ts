@@ -94,11 +94,18 @@ export interface CartItem {
   name: string;
   price: number;
   oldPrice?: string;
+  originalPrice?: number;
   image?: string;
   store: string;
+  storeName?: string;
+  storeAddress?: string;
+  storePhone?: string;
+  merchantPhone?: string;
+  whatsapp?: string;
   dist?: string;
   quantity: number;
   cat?: string;
+  unit?: string;
 }
 
 export interface DeliveryAddress {
@@ -136,6 +143,8 @@ export interface Order {
   customerPhone: string;
   deliveryAddress: DeliveryAddress | string;
   storeName?: string;
+  merchantPhone?: string;
+  storePhone?: string;
   estimatedDeliveryMins: number;
   createdAt: string;
 }

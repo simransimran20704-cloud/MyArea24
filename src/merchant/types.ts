@@ -36,6 +36,7 @@ export interface MerchantOrderItem {
   status: 'placed' | 'confirmed' | 'out_for_delivery' | 'delivered' | 'cancelled';
   createdAt: string;
   estimatedDeliveryMins?: number;
+  fulfillmentType?: 'DELIVERY' | 'PICKUP';
   notes?: string;
 }
 
@@ -64,6 +65,14 @@ export interface MerchantBusinessInfo {
   logo: string;
   coverImage: string;
   gstin?: string;
+  fssaiLicenseNumber?: string;
+  fssai_license_number?: string;
+  settlementUpiId?: string;
+  settlement_upi_id?: string;
+  settlementBankAccount?: string;
+  settlement_bank_account?: string;
+  settlementBankIfsc?: string;
+  settlement_bank_ifsc?: string;
 }
 
 export interface MerchantProductItem {

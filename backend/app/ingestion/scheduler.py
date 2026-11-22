@@ -22,6 +22,7 @@ class IngestionScheduler:
         self._traffic_lock: Optional[asyncio.Lock] = None
         self._sachet_lock: Optional[asyncio.Lock] = None
         self._aqi_lock: Optional[asyncio.Lock] = None
+        self._fuel_lock: Optional[asyncio.Lock] = None
         self._correlation_lock: Optional[asyncio.Lock] = None
         self._tasks: list[asyncio.Task] = []
 
@@ -49,6 +50,11 @@ class IngestionScheduler:
         if self._aqi_lock is None:
             self._aqi_lock = asyncio.Lock()
         return self._aqi_lock
+
+    def _get_fuel_lock(self) -> asyncio.Lock:
+        if self._fuel_lock is None:
+            self._fuel_lock = asyncio.Lock()
+        return self._fuel_lock
 
     def _get_correlation_lock(self) -> asyncio.Lock:
         if self._correlation_lock is None:
@@ -137,6 +143,23 @@ class IngestionScheduler:
             except asyncio.TimeoutError:
                 pass
 
+    async def _fuel_loop(self):
+        interval_sec = getattr(settings, "FUEL_POLL_INTERVAL_MINUTES", 60) * 60
+        logger.info(f"[scheduler] Starting Fuel Prices (India Petroleum API) loop (interval: {interval_sec}s)")
+        event = self._get_shutdown_event()
+        while not event.is_set():
+            if settings.INGESTION_ENABLED and (settings.APP_ENV or "").lower() not in ("testing", "test"):
+                try:
+                    async with self._get_fuel_lock():
+                        with SessionLocal() as db:
+                            await self.worker.sync_fuel_prices(db)
+                except Exception as e:
+                    logger.error(f"[scheduler] Fuel price job unhandled error: {e}")
+            try:
+                await asyncio.wait_for(event.wait(), timeout=interval_sec)
+            except asyncio.TimeoutError:
+                pass
+
     async def _correlation_loop(self):
         interval_sec = getattr(settings, "CORRELATION_POLL_INTERVAL_MINUTES", 10) * 60
         logger.info(f"[scheduler] Starting Cross-Signal Correlation loop (interval: {interval_sec}s)")
@@ -177,6 +200,7 @@ class IngestionScheduler:
         self._traffic_lock = asyncio.Lock()
         self._sachet_lock = asyncio.Lock()
         self._aqi_lock = asyncio.Lock()
+        self._fuel_lock = asyncio.Lock()
         self._correlation_lock = asyncio.Lock()
         try:
             with SessionLocal() as db:
@@ -191,10 +215,11 @@ class IngestionScheduler:
         self._tasks.append(loop.create_task(self._traffic_loop()))
         self._tasks.append(loop.create_task(self._sachet_loop()))
         self._tasks.append(loop.create_task(self._aqi_loop()))
+        self._tasks.append(loop.create_task(self._fuel_loop()))
         self._tasks.append(loop.create_task(self._correlation_loop()))
         logger.info(
             "[scheduler] Background ingestion & correlation loops initialized "
-            "(weather, traffic, sachet, air_quality, correlation)."
+            "(weather, traffic, sachet, air_quality, fuel, correlation)."
         )
 
     async def stop(self):
@@ -217,7 +242,7 @@ class IngestionScheduler:
             "running": self._running,
             "ingestion_enabled": settings.INGESTION_ENABLED,
             "active_tasks": len([t for t in self._tasks if not t.done()]),
-            "loops": ["weather", "traffic", "sachet", "air_quality", "correlation"],
+            "loops": ["weather", "traffic", "sachet", "air_quality", "fuel", "correlation"],
         }
 
 

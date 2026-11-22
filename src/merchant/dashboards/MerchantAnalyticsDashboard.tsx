@@ -230,9 +230,9 @@ export function MerchantAnalyticsDashboard({
 
               {totalViews === 0 && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                  <p className="text-xs font-bold text-slate-500">Performance Chart Calibrating</p>
+                  <p className="text-xs font-bold text-slate-500">Performance Chart Updating</p>
                   <p className="text-[10px] text-slate-400 mt-0.5">
-                    Live telemetry will render trends as nearby residents browse your store.
+                    Activity trends will display here as local residents browse your store.
                   </p>
                 </div>
               )}

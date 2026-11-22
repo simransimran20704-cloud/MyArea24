@@ -1,7 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
+import React, { useState, useEffect, useMemo, useCallback, Suspense, useRef } from 'react';
+import type L from 'leaflet';
 import {
   Plus,
   Minus,
@@ -11,12 +9,17 @@ import {
   Radio,
   Car,
   Layers,
-  Phone,
-  Navigation,
+  MapPin,
+  Loader2,
 } from 'lucide-react';
 
-import { LiveNearbyPoi } from '../services/liveIntelligence';
+import { LiveNearbyPoi, searchLocationsLive } from '../services/liveIntelligence';
+import { useLocationStore } from '../stores/useLocationStore';
+import type { UserLocation } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
+
+// Lazy-load the heavy Leaflet GIS Map Container & react-leaflet-cluster so it doesn't block initial page render
+const LazyLeafletMapContainer = React.lazy(() => import('./LeafletMapContainer'));
 
 export interface MapPinItem {
   id: string;
@@ -67,147 +70,56 @@ export interface InteractiveMapProps {
 
 const TILE_PROVIDERS = [
   {
-    name: 'Carto Voyager (Street)',
-    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-    attribution: '&copy; CARTO &copy; OpenStreetMap contributors',
-  },
-  {
-    name: 'OpenStreetMap (Standard)',
+    name: 'Standard Vector Map',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; OpenStreetMap contributors',
+    attribution: 'MyArea24 Hyperlocal Maps',
   },
   {
-    name: 'Carto Dark Matter (Night)',
+    name: 'Street View',
+    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+    attribution: 'MyArea24 Hyperlocal Maps',
+  },
+  {
+    name: 'Night Map',
     url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution: '&copy; CARTO &copy; OpenStreetMap contributors',
+    attribution: 'MyArea24 Hyperlocal Maps',
   },
 ];
 
-const COLOR_MAP: Record<string, string> = {
-  orange: '#f97316',
-  blue: '#2563eb',
-  green: '#10b981',
-  red: '#ef4444',
-  purple: '#9333ea',
-  amber: '#f59e0b',
-  indigo: '#4f46e5',
-  pink: '#ec4899',
-};
-
-function getCategorySvg(icon?: string): string {
-  switch (icon) {
-    case 'food':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="m16 2-2 20"/><path d="M7 2v20"/><path d="M21 15V2v0a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/><path d="M3 2v7c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V2"/></svg>`;
-    case 'shop':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>`;
-    case 'hospital':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6v12"/><path d="M6 12h12"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>`;
-    case 'police':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>`;
-    case 'fire':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>`;
-    case 'fuel':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="3" x2="15" y1="22" y2="22"/><line x1="4" x2="14" y1="9" y2="9"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h0a2 2 0 0 0 2-2V9.83a2 2 0 0 0-.59-1.42L18 5"/></svg>`;
-    case 'park':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M10 10v.2A3 3 0 0 1 8.9 16H5a3 3 0 0 1-1-5.8V10a3 3 0 0 1 6 0Z"/><path d="M7 16v6"/><path d="M13 19v3"/><path d="M12 19h8.3a1 1 0 0 0 .7-1.7L18 14h.3a1 1 0 0 0 .7-1.7L16 9h.2a1 1 0 0 0 .8-1.7L13 3l-1.4 1.5"/></svg>`;
-    case 'car':
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></svg>`;
-    default:
-      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>`;
-  }
-}
-
-function createCustomPinIcon(color: string, icon?: string): L.DivIcon {
-  const bg = COLOR_MAP[color] || '#4f46e5';
-  const svg = getCategorySvg(icon);
-  return L.divIcon({
-    className: 'gis-custom-pin',
-    html: `
-      <div style="background-color: ${bg}; width: 30px; height: 30px; border-radius: 9999px; display: flex; align-items: center; justify-content: center; color: #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.3); border: 2.5px solid #ffffff; cursor: pointer; transition: transform 0.15s ease-in-out;">
-        ${svg}
+/**
+ * Non-blocking Responsive Map Loading Skeleton
+ * Prevents layout shift during dynamic Leaflet chunk downloading and initialization
+ */
+const MapLoadingSkeleton: React.FC<{ heightClass?: string; centerLabel?: string }> = ({
+  heightClass = 'h-64',
+  centerLabel = 'Local Area',
+}) => (
+  <div
+    className={`relative w-full ${heightClass} rounded-xl overflow-hidden border border-slate-200/80 bg-slate-100/90 flex flex-col items-center justify-center select-none shadow-inner`}
+    style={{
+      backgroundImage: `radial-gradient(#cbd5e1 1.2px, transparent 1.2px)`,
+      backgroundSize: '24px 24px',
+    }}
+  >
+    {/* Center pulsing radar pin */}
+    <div className="relative flex flex-col items-center justify-center pointer-events-none">
+      <div className="absolute w-14 h-14 rounded-full bg-blue-500/20 animate-ping" />
+      <div className="w-9 h-9 rounded-full bg-blue-600/20 border border-blue-400 flex items-center justify-center shadow-md">
+        <div className="w-4 h-4 rounded-full bg-blue-600 border-2 border-white shadow-sm" />
       </div>
-    `,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
-    popupAnchor: [0, -18],
-  });
-}
-
-function createUserCenterIcon(label: string): L.DivIcon {
-  return L.divIcon({
-    className: 'gis-user-center-pin',
-    html: `
-      <div style="position: relative; display: flex; flex-direction: column; align-items: center; pointer-events: none;">
-        <div style="background: rgba(255,255,255,0.96); backdrop-filter: blur(4px); padding: 3px 8px; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); border: 1px solid #cbd5e1; font-size: 10px; font-weight: 800; color: #0f172a; white-space: pre; text-align: center; margin-bottom: 4px;">
-          ${label}
-        </div>
-        <div style="position: relative; display: flex; align-items: center; justify-content: center;">
-          <div style="position: absolute; width: 34px; height: 34px; border-radius: 9999px; background: rgba(59,130,246,0.35); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-          <div style="width: 22px; height: 22px; border-radius: 9999px; background: rgba(59,130,246,0.3); display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(37,99,235,0.4);">
-            <div style="width: 12px; height: 12px; border-radius: 9999px; background: #2563eb; border: 2.5px solid #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.25);"></div>
-          </div>
-        </div>
+      <div className="mt-3 px-3.5 py-1.5 rounded-full bg-white/95 border border-slate-200 shadow-sm text-slate-700 text-xs font-bold flex items-center gap-2 backdrop-blur-sm animate-pulse">
+        <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping" />
+        <span>Initializing Clustered GIS Map ({centerLabel.split('\n')[0]})...</span>
       </div>
-    `,
-    iconSize: [120, 60],
-    iconAnchor: [60, 48],
-    popupAnchor: [0, -50],
-  });
-}
+    </div>
 
-// Memoized Icon Caches to prevent thrashing DOM and leaflet recreateIcon loops
-const customPinIconCache = new Map<string, L.DivIcon>();
-function getCachedCustomPinIcon(color: string, iconType?: string): L.DivIcon {
-  const key = `${color}:${iconType || ''}`;
-  let icon = customPinIconCache.get(key);
-  if (!icon) {
-    icon = createCustomPinIcon(color, iconType);
-    customPinIconCache.set(key, icon);
-  }
-  return icon;
-}
-
-const userCenterIconCache = new Map<string, L.DivIcon>();
-function getCachedUserCenterIcon(label: string): L.DivIcon {
-  let icon = userCenterIconCache.get(label);
-  if (!icon) {
-    icon = createUserCenterIcon(label);
-    userCenterIconCache.set(label, icon);
-  }
-  return icon;
-}
-
-// Map Controller for synchronized view setting and capturing map instance
-function MapController({
-  center,
-  zoom,
-  onMapReady,
-}: {
-  center: [number, number];
-  zoom: number;
-  onMapReady?: (map: L.Map) => void;
-}) {
-  const map = useMap();
-
-  useEffect(() => {
-    onMapReady?.(map);
-  }, [map, onMapReady]);
-
-  useEffect(() => {
-    // Only set view if map container has valid dimensions
-    try {
-      const size = map.getSize();
-      if (size.x > 0 && size.y > 0) {
-        map.setView(center, zoom, { animate: false });
-        map.invalidateSize();
-      }
-    } catch {
-      // ignore dimension calculation errors in detached or transitioning containers
-    }
-  }, [center[0], center[1], zoom, map]);
-
-  return null;
-}
+    {/* Mock controls for 0 cumulative layout shift */}
+    <div className="absolute bottom-2.5 right-2.5 z-10 flex flex-col gap-1 opacity-40 pointer-events-none">
+      <div className="bg-white/80 rounded-lg shadow-sm border border-slate-200 flex flex-col w-7 h-14" />
+      <div className="w-7 h-7 rounded-lg bg-white/80 shadow-sm border border-slate-200" />
+    </div>
+  </div>
+);
 
 export const InteractiveMap: React.FC<InteractiveMapProps> = ({
   centerLabel = 'Your Area\nLocal Center',
@@ -227,8 +139,25 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
   onPinClick,
 }) => {
   const coords = propCoords || centerCoords || { lat: 28.6139, lng: 77.2090 };
-  const centerLat = coords.lat;
-  const centerLng = coords.lng;
+  const [internalCoords, setInternalCoords] = useState<{ lat: number; lng: number }>(coords);
+  const [internalLabel, setInternalLabel] = useState<string>(centerLabel);
+  const [searchSuggestions, setSearchSuggestions] = useState<UserLocation[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (propCoords || centerCoords) {
+      setInternalCoords(propCoords || centerCoords!);
+    }
+  }, [propCoords, centerCoords]);
+
+  useEffect(() => {
+    if (centerLabel) {
+      setInternalLabel(centerLabel);
+    }
+  }, [centerLabel]);
+
+  const centerLat = internalCoords.lat;
+  const centerLng = internalCoords.lng;
 
   const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
   const [zoom, setZoom] = useState(14);
@@ -241,22 +170,63 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     setTrafficVisible(showTrafficRoutes);
   }, [showTrafficRoutes]);
 
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setSearchSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    setIsSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const matches = await searchLocationsLive(q);
+        if (!cancelled) {
+          setSearchSuggestions(matches);
+        }
+      } finally {
+        if (!cancelled) setIsSearching(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
+  const handleSelectMapLocation = (loc: UserLocation) => {
+    setSearchQuery('');
+    setSearchSuggestions([]);
+    setInternalCoords(loc.coords);
+    setInternalLabel(loc.label);
+    if (mapInstance) {
+      mapInstance.setView([loc.coords.lat, loc.coords.lng], 14, { animate: true });
+    }
+    useLocationStore.getState().setLocation(loc);
+  };
+
   const normalizedTraffic = useMemo(() => {
     if (typeof trafficStatusLabel === 'string') {
       return {
         title: trafficStatusLabel.split('(')[0]?.trim() || trafficStatusLabel,
         speed: trafficStatusLabel.includes('(')
           ? trafficStatusLabel.slice(trafficStatusLabel.indexOf('(') + 1).replace(')', '').trim()
-          : 'Live Telemetry',
+          : 'Live Traffic',
       };
     }
     return trafficStatusLabel;
   }, [trafficStatusLabel]);
 
-  // Unified pins with accurate latitude & longitude
+  const lastPoisRef = useRef<LiveNearbyPoi[]>([]);
+  if (pois && pois.length > 0) {
+    lastPoisRef.current = pois;
+  }
+
+  // Unified pins with accurate latitude & longitude (stale-while-revalidate smooth transitions)
   const activePins: MapPinItem[] = useMemo(() => {
-    if (pois && pois.length > 0) {
-      return pois.map((p, idx) => {
+    const effectivePois = pois && pois.length > 0 ? pois : lastPoisRef.current;
+    if (effectivePois && effectivePois.length > 0) {
+      return effectivePois.map((p, idx) => {
         const cat = p.category;
         const icon: MapPinItem['icon'] =
           cat === 'hospital'
@@ -304,7 +274,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
     if (propPins && propPins.length > 0) {
       return propPins.map((p) => {
-        // If pin has explicit lat/lng use it; otherwise compute from percentage x, y
         const pinLat = p.lat ?? centerLat + ((p.y ?? 50) - 50) * 0.00035;
         const pinLng = p.lng ?? centerLng + ((p.x ?? 50) - 50) * 0.00035;
         return {
@@ -478,155 +447,77 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       <div
         className={`relative w-full ${heightClass} rounded-xl overflow-hidden border border-slate-200/80 bg-slate-100 select-none group shadow-inner`}
       >
-        {/* Real Leaflet GIS Map Engine */}
-        <MapContainer
-          center={[centerLat, centerLng]}
-          zoom={zoom}
-          zoomControl={false}
-          scrollWheelZoom={true}
-          style={{ width: '100%', height: '100%', zIndex: 0 }}
-        >
-          <MapController
-            center={[centerLat, centerLng]}
+        {/* Lazy-Loaded Leaflet Map Container with Clustered POIs */}
+        <Suspense fallback={<MapLoadingSkeleton heightClass={heightClass} centerLabel={internalLabel} />}>
+          <LazyLeafletMapContainer
+            centerLat={centerLat}
+            centerLng={centerLng}
+            centerLabel={internalLabel}
             zoom={zoom}
+            currentTile={currentTile}
+            trafficVisible={trafficVisible}
+            trafficCorridors={trafficCorridors}
+            filteredPins={filteredPins}
+            onPinClick={onPinClick}
             onMapReady={setMapInstance}
           />
-
-          {/* Real Street-Level Tiles Layer */}
-          <TileLayer
-            key={currentTile.name}
-            url={currentTile.url}
-            attribution={currentTile.attribution}
-            maxZoom={19}
-          />
-
-          {/* User Current Locality Center Marker */}
-          <Marker
-            position={[centerLat, centerLng]}
-            icon={getCachedUserCenterIcon(centerLabel)}
-            title={`Current Center: ${centerLabel}`}
-            alt={`Current Center: ${centerLabel}`}
-          >
-            <Popup>
-              <div className="p-1 min-w-[160px] text-center">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-0.5">
-                  Your Current Center
-                </p>
-                <h4 className="text-xs font-black text-slate-900 whitespace-pre-line mb-1">
-                  {centerLabel}
-                </h4>
-                <p className="text-[10px] text-slate-500 font-mono">
-                  {centerLat.toFixed(4)}°N, {centerLng.toFixed(4)}°E
-                </p>
-              </div>
-            </Popup>
-          </Marker>
-
-          {/* Real GPS Traffic Arterial Polylines */}
-          {trafficVisible &&
-            trafficCorridors.map((c) => (
-              <Polyline
-                key={c.id}
-                positions={c.path}
-                pathOptions={{
-                  color: c.color,
-                  weight: 6,
-                  opacity: 0.85,
-                  lineCap: 'round',
-                  lineJoin: 'round',
-                }}
-              >
-                <Popup>
-                  <div className="p-1 text-xs">
-                    <p className="font-extrabold text-slate-900">{c.name}</p>
-                    <p className="text-[11px] font-bold" style={{ color: c.color }}>
-                      {c.speed} • {c.status}
-                    </p>
-                  </div>
-                </Popup>
-              </Polyline>
-            ))}
-
-          {/* Interactive POI & Business Pins */}
-          {filteredPins.map((pin) => (
-            <Marker
-              key={pin.id}
-              position={[pin.lat!, pin.lng!]}
-              icon={getCachedCustomPinIcon(pin.color, pin.icon)}
-              title={pin.label || 'Neighborhood Location'}
-              alt={pin.label || 'Neighborhood Location'}
-              eventHandlers={{
-                click: () => onPinClick?.(pin),
-              }}
-            >
-              <Popup>
-                <div className="p-1 min-w-[200px]">
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase bg-slate-100 text-slate-700">
-                      {pin.icon || 'Place'}
-                    </span>
-                    {pin.sublabel && (
-                      <span className="text-[10px] text-slate-500 font-medium truncate">
-                        {pin.sublabel}
-                      </span>
-                    )}
-                  </div>
-                  <h4 className="text-xs font-black text-slate-900 leading-tight mb-1">
-                    {pin.label}
-                  </h4>
-                  {pin.address && (
-                    <p className="text-[10px] text-slate-600 mb-2 leading-relaxed">
-                      {pin.address}
-                    </p>
-                  )}
-                  <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
-                    {pin.phone && (
-                      <a
-                        href={`tel:${pin.phone}`}
-                        className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-800"
-                      >
-                        <Phone className="w-3 h-3" />
-                        <span>Call</span>
-                      </a>
-                    )}
-                    <a
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${pin.lat},${pin.lng}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 ml-auto"
-                    >
-                      <Navigation className="w-3 h-3" />
-                      <span>Directions</span>
-                    </a>
-                  </div>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
-        </MapContainer>
+        </Suspense>
 
         {/* Top Search Input Inside Map */}
         {showSearchOverlay && (
           <div className="absolute top-2.5 left-2.5 right-28 z-[1001] pointer-events-auto">
             <div className="bg-white/95 backdrop-blur-sm rounded-lg shadow-md border border-slate-200/80 px-2.5 py-1.5 flex items-center gap-2">
-              <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              {isSearching ? (
+                <Loader2 className="w-3.5 h-3.5 text-blue-600 animate-spin shrink-0" />
+              ) : (
+                <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              )}
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchSuggestions.length > 0) {
+                    e.preventDefault();
+                    handleSelectMapLocation(searchSuggestions[0]);
+                  }
+                }}
                 placeholder="Search location on map..."
                 className="bg-transparent text-xs text-slate-700 placeholder:text-slate-400 focus:outline-none w-full"
               />
               {searchQuery && (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="text-xs text-slate-400 hover:text-slate-600"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSearchSuggestions([]);
+                  }}
+                  className="text-xs text-slate-400 hover:text-slate-600 cursor-pointer"
                 >
                   ✕
                 </button>
               )}
             </div>
+
+            {/* Suggestions Dropdown */}
+            {searchSuggestions.length > 0 && (
+              <div className="mt-1 bg-white/95 backdrop-blur-md rounded-xl shadow-xl border border-slate-200 overflow-hidden divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                {searchSuggestions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => handleSelectMapLocation(s)}
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50 flex items-start gap-2 transition cursor-pointer"
+                  >
+                    <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <p className="font-extrabold text-slate-900 truncate">{s.label}</p>
+                      <p className="text-[10px] text-slate-500 truncate">{s.areaName}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -654,7 +545,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         {showLiveViewBadge && (
           <div className="absolute top-2.5 right-2.5 z-[1001] bg-white/95 backdrop-blur-sm px-2.5 py-1 rounded-lg shadow-md border border-slate-200/80 flex items-center gap-1.5 text-[11px] font-bold text-slate-800 pointer-events-auto">
             <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
-            <span>GIS ({centerLat.toFixed(2)}°N)</span>
+            <span>Live Radar</span>
           </div>
         )}
 
@@ -706,7 +597,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
                 {normalizedTraffic?.title || 'Live Arterial Flow'}
               </p>
               <p className="text-[9px] text-red-600 font-bold">
-                {normalizedTraffic?.speed || 'Live Telemetry'}
+                {normalizedTraffic?.speed || 'Live Traffic'}
               </p>
             </div>
           </div>

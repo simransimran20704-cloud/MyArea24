@@ -8,6 +8,19 @@ export const MERCHANT_INQUIRY_EVENT = 'myarea24_merchant_live_message';
 export const MERCHANT_REVIEW_EVENT = 'myarea24_merchant_live_review';
 export const ORDER_STATUS_EVENT = 'myarea24_order_status_update';
 export const MERCHANT_ORDER_EVENT = 'myarea24_merchant_live_order';
+export const WAKELOCK_STATUS_EVENT = 'myarea24_wakelock_status';
+export const PUSH_SUBSCRIPTION_EVENT = 'myarea24_push_status';
+
+export function urlB64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
 
 export type RealtimeConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
@@ -103,11 +116,27 @@ if (typeof window !== 'undefined') {
 
 // Gentle Web Audio API synthesizer for instant zero-dependency sound alerts
 function playSoundNotification(type: 'alert' | 'lead' | 'order') {
+  if (typeof window !== 'undefined') {
+    try {
+      const consentRaw = localStorage.getItem('myarea24_dpdp_consent');
+      if (consentRaw) {
+        const consent = JSON.parse(consentRaw);
+        if (consent.notifications === false && type === 'alert') {
+          return; // Suppress civic notification audio if user disabled notifications
+        }
+      }
+    } catch {}
+  }
   try {
     const ctx = getSharedAudioContext();
     if (!ctx) return;
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
+      try {
+        const audio = new Audio('/chime.wav');
+        audio.volume = 0.85;
+        audio.play().catch(() => {});
+      } catch {}
       return;
     }
 
@@ -125,20 +154,42 @@ function playSoundNotification(type: 'alert' | 'lead' | 'order') {
       osc.start();
       osc.stop(ctx.currentTime + 0.36);
     } else if (type === 'order') {
-      // 3-tone cheerful cash register chime for new orders (D5: 587Hz -> G5: 784Hz -> B5: 988Hz)
+      // 4-tone resonant cash register chime with overtone bell for new orders:
+      // D5 (587.3Hz) -> G5 (784Hz) -> B5 (987.8Hz) -> high overtone E6 (1318.5Hz)
       const t = ctx.currentTime;
       const osc = ctx.createOscillator();
+      const overtone = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'sine';
+
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(587.33, t);
-      osc.frequency.setValueAtTime(783.99, t + 0.1);
-      osc.frequency.setValueAtTime(987.77, t + 0.2);
-      gain.gain.setValueAtTime(0.18, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+      osc.frequency.setValueAtTime(783.99, t + 0.12);
+      osc.frequency.setValueAtTime(987.77, t + 0.24);
+      osc.frequency.setValueAtTime(1318.51, t + 0.36);
+
+      overtone.type = 'sine';
+      overtone.frequency.setValueAtTime(1174.66, t);
+      overtone.frequency.setValueAtTime(1567.98, t + 0.12);
+      overtone.frequency.setValueAtTime(1975.53, t + 0.24);
+
+      gain.gain.setValueAtTime(0.26, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+
       osc.connect(gain);
+      overtone.connect(gain);
       gain.connect(ctx.destination);
+
       osc.start(t);
-      osc.stop(t + 0.46);
+      overtone.start(t);
+      osc.stop(t + 0.66);
+      overtone.stop(t + 0.66);
+
+      // Mobile device vibration pattern for lock screen ring:
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate([300, 100, 300, 100, 300, 100, 500]);
+        } catch {}
+      }
     } else {
       // Pleasant 2-tone chime for leads & messages (523Hz -> 659Hz)
       const osc = ctx.createOscillator();
@@ -169,16 +220,42 @@ class RealtimePushService {
   private options: RealtimeSubscriptionOptions = {};
   private clientId = `client-${Math.random().toString(36).substring(2, 9)}`;
   private activeOrderSubscriptions: Set<string> = new Set();
+  private lastActiveTimestamp = Date.now();
+  private wakeLock: any = null;
+  private isWakeLockRequested = false;
+  private swRegistration: ServiceWorkerRegistration | null = null;
+  private seenAlertHashes: Map<string, number> = new Map();
+  private recentAlertTimestamps: number[] = [];
+  private readonly ALERT_WINDOW_MS = 15 * 60 * 1000; // 15 mins fatigue prevention window
+  private readonly MAX_ALERTS_PER_WINDOW = 3;
 
   constructor() {
-    // Listen for tab focus to quickly re-establish socket if suspended by browser
+    // Listen for tab focus, online status & wake-from-sleep to quickly re-establish socket and sync missed orders
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => this.reconnect());
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && this.status === 'disconnected') {
-          this.reconnect();
+        if (document.visibilityState === 'visible') {
+          // Re-engage screen wake lock if merchant had activated it
+          if (this.isWakeLockRequested && !this.wakeLock) {
+            this.requestWakeLock().catch(() => {});
+          }
+          // Re-establish socket if suspended while device was asleep
+          if (this.status === 'disconnected' || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            this.reconnect();
+          }
+          // Recover any missed orders that arrived while the screen was sleeping
+          const elapsedSleepMs = Date.now() - this.lastActiveTimestamp;
+          if (elapsedSleepMs > 4000 && this.options.businessId) {
+            this.syncMissedMerchantOrders(this.options.businessId).catch(() => {});
+          }
+          this.lastActiveTimestamp = Date.now();
+        } else {
+          this.lastActiveTimestamp = Date.now();
         }
       });
+
+      // Automatically register service worker for background lock-screen push notifications
+      this.initServiceWorker().catch(() => {});
     }
   }
 
@@ -391,7 +468,34 @@ class RealtimePushService {
   }
 
   private dispatchCivicAlert(rawAlert: any, isPush: boolean) {
+    const title = (rawAlert.title || '').trim().toLowerCase();
+    const area = (rawAlert.areaDescription || this.options.area || '').trim().toLowerCase();
+    const alertKey = `${title}::${area}`;
+    const now = Date.now();
+
+    // 1. Alert Deduplication: Suppress duplicates within 15 mins
+    const lastSeen = this.seenAlertHashes.get(alertKey);
+    if (lastSeen && now - lastSeen < this.ALERT_WINDOW_MS) {
+      return;
+    }
+    this.seenAlertHashes.set(alertKey, now);
+
+    // Evict old hash entries
+    for (const [key, ts] of this.seenAlertHashes.entries()) {
+      if (now - ts > this.ALERT_WINDOW_MS) {
+        this.seenAlertHashes.delete(key);
+      }
+    }
+
     const sev = rawAlert.severity === 'Critical' ? 'Critical' : 'Important';
+
+    // 2. Alert Fatigue Rate Limiter: Max 3 non-critical alerts per 15 mins
+    this.recentAlertTimestamps = this.recentAlertTimestamps.filter((t) => now - t < this.ALERT_WINDOW_MS);
+    if (sev !== 'Critical' && this.recentAlertTimestamps.length >= this.MAX_ALERTS_PER_WINDOW) {
+      return;
+    }
+    this.recentAlertTimestamps.push(now);
+
     const alertItem: LiveAlertItem = {
       id: rawAlert.id || `alert-${Date.now()}`,
       title: rawAlert.title || 'Civic Notice',
@@ -804,8 +908,8 @@ class RealtimePushService {
             business_id: bizId,
             business_name: custom?.businessName || (this.options.businessId ? 'Your Storefront' : 'Verified Storefront'),
             customer_name: custom?.customerName || 'Local Citizen',
-            customer_phone: custom?.customerPhone || '+91 98765 43210',
-            delivery_address: custom?.deliveryAddress || (this.options.area ? `Flat 402, Tower B, ${this.options.area}` : 'Local Residential Complex'),
+            customer_phone: custom?.customerPhone || '+91 98000 00000',
+            delivery_address: custom?.deliveryAddress || (this.options.area ? `Sector Block, ${this.options.area}` : 'Local Residential Complex'),
             final_payable: custom?.finalPayable || 380.0,
             items: custom?.items,
           }),
@@ -824,8 +928,8 @@ class RealtimePushService {
         business_id: bizId,
         business_name: custom?.businessName || 'Verified Storefront',
         customer_name: custom?.customerName || 'Local Citizen',
-        customer_phone: custom?.customerPhone || '+91 98765 43210',
-        delivery_address: custom?.deliveryAddress || (this.options.area ? `Flat 402, Tower B, ${this.options.area}` : 'Local Residential Complex'),
+        customer_phone: custom?.customerPhone || '+91 98000 00000',
+        delivery_address: custom?.deliveryAddress || (this.options.area ? `Sector Block, ${this.options.area}` : 'Local Residential Complex'),
         final_payable: custom?.finalPayable || 380.0,
         payment_method: 'upi_qr',
         payment_status: 'paid',
@@ -846,9 +950,13 @@ class RealtimePushService {
     const rawBackend = getBackendUrl();
     if (rawBackend) {
       try {
+        const token = localStorage.getItem('myarea24_merchant_token') || localStorage.getItem('myarea24_auth_token');
         const res = await fetch(`${rawBackend.replace(/\/+$/, '')}/api/v1/ws/trigger-order-status`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({
             order_number: orderNumber,
             status,
@@ -861,15 +969,343 @@ class RealtimePushService {
         // Fallback local dispatch
       }
     }
-      this.dispatchOrderStatusUpdate({
-        order_number: orderNumber,
-        status,
-        payment_status: 'paid',
-        notes: `Order transitioned to ${status}`,
-        updated_at: new Date().toISOString(),
-      });
-      return true;
+    this.dispatchOrderStatusUpdate({
+      order_number: orderNumber,
+      status,
+      payment_status: 'paid',
+      notes: `Order transitioned to ${status}`,
+      updated_at: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  // =========================================================================
+  // AUDIO CHIME & SERVICE WORKER BACKGROUND WEB PUSH NOTIFICATIONS
+  // =========================================================================
+
+  /**
+   * Explicitly triggers the resonant cash register order chime with overtone bell & device vibration.
+   */
+  public playOrderChime(loud: boolean = true) {
+    playSoundNotification('order');
+  }
+
+  /**
+   * Initializes the Service Worker for background order notifications and lock-screen ringing.
+   */
+  public async initServiceWorker(): Promise<ServiceWorkerRegistration | null> {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+      return null;
     }
+    try {
+      this.swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+
+      // Listen for push notifications received while screen was asleep or in background
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (!event.data) return;
+        if (event.data.type === 'PUSH_ORDER_RECEIVED') {
+          const payload = event.data.payload || {};
+          this.playOrderChime(true);
+          if (payload.orderNumber || payload.businessId) {
+            this.dispatchMerchantOrder(payload, payload.businessId || this.options.businessId || 'default');
+          }
+        } else if (event.data.type === 'FOCUS_ORDER') {
+          this.playOrderChime(true);
+        }
+      });
+
+      return this.swRegistration;
+    } catch (e) {
+      console.warn('[sw] Service worker registration error:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Requests browser notification permission.
+   */
+  public async requestNotificationPermission(): Promise<NotificationPermission> {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return 'denied';
+    }
+    try {
+      return await Notification.requestPermission();
+    } catch {
+      return Notification.permission;
+    }
+  }
+
+  /**
+   * Returns current Web Push support and subscription status.
+   */
+  public async getPushSubscriptionStatus(): Promise<{
+    supported: boolean;
+    permission: NotificationPermission;
+    isSubscribed: boolean;
+    endpoint?: string;
+  }> {
+    if (
+      typeof window === 'undefined' ||
+      !('serviceWorker' in navigator) ||
+      !('PushManager' in window) ||
+      typeof Notification === 'undefined'
+    ) {
+      return { supported: false, permission: 'denied', isSubscribed: false };
+    }
+    const permission = Notification.permission;
+    try {
+      const reg = this.swRegistration || (await navigator.serviceWorker.getRegistration());
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      return {
+        supported: true,
+        permission,
+        isSubscribed: Boolean(sub),
+        endpoint: sub?.endpoint,
+      };
+    } catch {
+      return { supported: true, permission, isSubscribed: false };
+    }
+  }
+
+  /**
+   * Subscribes the merchant device to Web Push notifications using VAPID.
+   * Enables lock screen audio chime and push alerts when the screen is locked/sleeping.
+   */
+  public async subscribeMerchantToPush(
+    businessId: string
+  ): Promise<{ success: boolean; error?: string; subscription?: any }> {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { success: false, error: 'Web Push Notifications are not supported by this browser.' };
+    }
+
+    try {
+      const reg = this.swRegistration || (await this.initServiceWorker());
+      if (!reg) {
+        return { success: false, error: 'Could not register Service Worker.' };
+      }
+
+      const permission = await this.requestNotificationPermission();
+      if (permission !== 'granted') {
+        return { success: false, error: 'Notification permission was denied. Please allow notifications in browser settings.' };
+      }
+
+      // 1. Fetch server VAPID public key
+      const rawBackend = getBackendUrl();
+      let vapidKey = 'BA7XldkXdRawZgM1WzKjpCqCBSl8xAMh3PKO-SQuyNrHgXV9ACSkiSnDQcmVI25peq-nG0a6QviXHLKyZ2f8j8g';
+      if (rawBackend) {
+        try {
+          const res = await fetch(`${rawBackend.replace(/\/+$/, '')}/api/v1/merchant/push-subscription/public-key`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.public_key) vapidKey = data.public_key;
+          }
+        } catch {}
+      }
+
+      const applicationServerKey = urlB64ToUint8Array(vapidKey);
+
+      // 2. Subscribe with PushManager
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey,
+        });
+      }
+
+      const subJson = sub.toJSON();
+      const p256dh = subJson.keys?.p256dh || '';
+      const auth = subJson.keys?.auth || '';
+
+      // 3. Register endpoint with backend database
+      if (rawBackend) {
+        const token =
+          localStorage.getItem('myarea24_merchant_token') || localStorage.getItem('myarea24_auth_token');
+        await fetch(`${rawBackend.replace(/\/+$/, '')}/api/v1/merchant/push-subscription`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            business_id: businessId,
+            endpoint: sub.endpoint,
+            p256dh,
+            auth,
+            user_agent: navigator.userAgent,
+          }),
+        });
+      }
+
+      localStorage.setItem('myarea24_push_subscribed', 'true');
+      window.dispatchEvent(
+        new CustomEvent(PUSH_SUBSCRIPTION_EVENT, { detail: { isSubscribed: true, businessId } })
+      );
+
+      return { success: true, subscription: subJson };
+    } catch (err: any) {
+      console.warn('[webpush] Error subscribing to Web Push:', err);
+      return { success: false, error: err?.message || 'Failed to complete push subscription.' };
+    }
+  }
+
+  /**
+   * Unsubscribes merchant from Web Push alerts.
+   */
+  public async unsubscribeMerchantFromPush(businessId: string): Promise<boolean> {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return false;
+    try {
+      const reg = this.swRegistration || (await navigator.serviceWorker.getRegistration());
+      if (reg) {
+        const sub = await reg.pushManager.getSubscription();
+        if (sub) {
+          const endpoint = sub.endpoint;
+          await sub.unsubscribe();
+          const rawBackend = getBackendUrl();
+          if (rawBackend) {
+            try {
+              await fetch(
+                `${rawBackend.replace(/\/+$/, '')}/api/v1/merchant/push-subscription?endpoint=${encodeURIComponent(endpoint)}&business_id=${encodeURIComponent(businessId)}`,
+                { method: 'DELETE' }
+              );
+            } catch {}
+          }
+        }
+      }
+      localStorage.removeItem('myarea24_push_subscribed');
+      window.dispatchEvent(
+        new CustomEvent(PUSH_SUBSCRIPTION_EVENT, { detail: { isSubscribed: false, businessId } })
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Dispatches a test order audio chime ring and lock screen notification.
+   */
+  public async triggerTestPush(businessId: string): Promise<boolean> {
+    // 1. Play loud resonant audio chime immediately on current device
+    this.playOrderChime(true);
+
+    // 2. Dispatch service worker test notification
+    if (this.swRegistration && this.swRegistration.active) {
+      this.swRegistration.active.postMessage({
+        type: 'TEST_NOTIFICATION',
+        title: '🛍️ Order Alert Ring Test — MyArea24',
+        body: 'Cash register chime and lock-screen ring verified! Your store is armed to ring even when asleep.',
+      });
+    }
+
+    // 3. Trigger backend push to registered mobile endpoints
+    const rawBackend = getBackendUrl();
+    if (rawBackend) {
+      try {
+        await fetch(
+          `${rawBackend.replace(/\/+$/, '')}/api/v1/merchant/test-push?business_id=${encodeURIComponent(businessId)}`,
+          { method: 'POST' }
+        );
+      } catch {}
+    }
+    return true;
+  }
+
+  // =========================================================================
+  // SCREEN WAKE LOCK API (Prevents phone from sleeping during shop hours)
+  // =========================================================================
+
+  /**
+   * Requests Screen Wake Lock so phone screen does not turn off while on counter duty.
+   */
+  public async requestWakeLock(): Promise<boolean> {
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+      try {
+        this.isWakeLockRequested = true;
+        this.wakeLock = await (navigator as any).wakeLock.request('screen');
+        this.wakeLock.addEventListener('release', () => {
+          this.wakeLock = null;
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent(WAKELOCK_STATUS_EVENT, { detail: { active: false } }));
+          }
+        });
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(WAKELOCK_STATUS_EVENT, { detail: { active: true } }));
+        }
+        return true;
+      } catch (e) {
+        console.warn('[wakeLock] Request failed:', e);
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Releases Screen Wake Lock.
+   */
+  public async releaseWakeLock(): Promise<boolean> {
+    this.isWakeLockRequested = false;
+    if (this.wakeLock) {
+      try {
+        await this.wakeLock.release();
+        this.wakeLock = null;
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(WAKELOCK_STATUS_EVENT, { detail: { active: false } }));
+        }
+        return true;
+      } catch {}
+    }
+    return false;
+  }
+
+  /**
+   * Returns whether Screen Wake Lock is currently holding the display awake.
+   */
+  public isWakeLockActive(): boolean {
+    return Boolean(this.wakeLock);
+  }
+
+  // =========================================================================
+  // MISSED ORDER SYNCHRONIZATION ON WAKE FROM SLEEP
+  // =========================================================================
+
+  /**
+   * Polls the backend for orders placed while the screen was sleeping/locked.
+   * Plays the chime and dispatches the live event for each missed order.
+   */
+  public async syncMissedMerchantOrders(businessId: string): Promise<number> {
+    const rawBackend = getBackendUrl();
+    if (!rawBackend) return 0;
+    try {
+      const token =
+        localStorage.getItem('myarea24_merchant_token') || localStorage.getItem('myarea24_auth_token');
+      const url = `${rawBackend.replace(/\/+$/, '')}/api/v1/merchant/orders?business_id=${encodeURIComponent(businessId)}`;
+      const res = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) return 0;
+      const json = await res.json();
+      const orders = Array.isArray(json.orders) ? json.orders : [];
+      let newOrdersCount = 0;
+
+      for (const ord of orders) {
+        const orderTime = new Date(ord.createdAt || ord.created_at).getTime();
+        // Check if placed within the recent sleep window
+        if (orderTime >= this.lastActiveTimestamp - 5000 && (ord.status === 'placed' || ord.status === 'confirmed')) {
+          newOrdersCount++;
+          this.playOrderChime(true);
+          this.dispatchMerchantOrder(ord, businessId);
+        }
+      }
+      return newOrdersCount;
+    } catch {
+      return 0;
+    }
+  }
   }
 
 // Global singleton instance

@@ -101,53 +101,90 @@ function getAuthEndpoint(path: string): string | null {
 }
 
 export async function requestOtp(
-  email: string,
-  purpose: 'login' | 'signup' | 'merchant_onboarding' = 'login'
-): Promise<{ success: boolean; message: string; devOtp?: string }> {
-  const cleanEmail = email.trim().toLowerCase();
+  identifier: string,
+  purpose: 'login' | 'signup' | 'merchant_onboarding' = 'login',
+  channelOverride?: 'sms' | 'email'
+): Promise<{
+  success: boolean;
+  message: string;
+  channel?: 'sms' | 'email';
+  targetMasked?: string;
+  dltCompliant?: boolean;
+  devOtp?: string;
+  error?: string;
+}> {
+  const cleanId = identifier.trim();
+  const isPhone = channelOverride === 'sms' || (!cleanId.includes('@') && /^[6-9]\d{9}$/.test(cleanId.replace(/\D/g, '').slice(-10)));
+  const cleanDigits = isPhone ? cleanId.replace(/\D/g, '').slice(-10) : '';
+  const cleanEmail = !isPhone ? cleanId.toLowerCase() : '';
 
   const ep = getAuthEndpoint('/api/v1/auth/request-otp');
   if (ep) {
     try {
+      const payload: Record<string, any> = {
+        identifier: isPhone ? cleanDigits : cleanEmail,
+        channel: isPhone ? 'sms' : 'email',
+        purpose,
+      };
+      if (isPhone) {
+        payload.phone = cleanDigits;
+      } else {
+        payload.email = cleanEmail;
+      }
+
       const res = await fetch(ep, {
         method: 'POST',
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ email: cleanEmail, purpose }),
+        body: JSON.stringify(payload),
       });
 
       if (res.ok) {
         const data = await res.json();
+        const storeKey = isPhone ? cleanDigits : (data.email || cleanEmail);
         if (data.dev_otp) {
-          pendingOtpStore.set(cleanEmail, {
+          pendingOtpStore.set(storeKey, {
             code: String(data.dev_otp).trim(),
             expiresAt: Date.now() + 10 * 60 * 1000,
           });
+          if (isPhone) {
+            pendingOtpStore.set(`${cleanDigits}@sms.myarea24.in`, {
+              code: String(data.dev_otp).trim(),
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            });
+          }
         }
         return {
           success: true,
-          message: data.message || `Verification code sent to ${cleanEmail}`,
+          message: data.message || (isPhone ? `Verification code sent to +91 ${cleanDigits}` : `Verification code sent to ${cleanEmail}`),
+          channel: data.channel || (isPhone ? 'sms' : 'email'),
+          targetMasked: data.target_masked || (isPhone ? `+91 ${cleanDigits.slice(0, 2)}*** **${cleanDigits.slice(-3)}` : cleanEmail),
+          dltCompliant: data.dlt_compliant,
           devOtp: data.dev_otp,
         };
+      } else {
+        const errData = await res.json().catch(() => null);
+        return {
+          success: false,
+          message: errData?.detail || 'Failed to request verification code. Please check your details.',
+          error: errData?.detail,
+        };
       }
-    } catch {
-      // Continue to local fallback
+    } catch (err: any) {
+      return {
+        success: false,
+        message: 'Network error: Unable to connect to authentication server. Please try again.',
+        error: err?.message || 'Network error',
+      };
     }
   }
 
-  // Fallback demo OTP when backend is offline
-  const fallbackCode = String(Math.floor(100000 + Math.random() * 900000));
-  pendingOtpStore.set(cleanEmail, {
-    code: fallbackCode,
-    expiresAt: Date.now() + 10 * 60 * 1000,
-  });
-
   return {
-    success: true,
-    message: `Verification code sent to ${cleanEmail} (Valid for 10 minutes).`,
-    devOtp: fallbackCode,
+    success: false,
+    message: 'Authentication service is unavailable. Please check your network or try again later.',
+    error: 'Backend endpoint unavailable',
   };
 }
 
@@ -155,13 +192,15 @@ export async function requestOtp(
  * Verifies submitted OTP code and saves JWT access & refresh tokens.
  */
 export async function verifyOtp(params: {
-  email: string;
+  email?: string;
+  phone?: string;
+  identifier?: string;
   otpCode: string;
   fullName?: string;
-  phone?: string;
   role?: 'resident' | 'merchant';
 }): Promise<{ success: boolean; user?: AuthUserProfile; error?: string }> {
-  const cleanEmail = params.email.trim().toLowerCase();
+  const cleanId = (params.identifier || params.phone || params.email || '').trim();
+  const cleanEmail = (params.email || cleanId).toLowerCase();
   const code = params.otpCode.trim();
 
   const ep = getAuthEndpoint('/api/v1/auth/verify-otp');
@@ -174,10 +213,11 @@ export async function verifyOtp(params: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          identifier: cleanId,
           email: cleanEmail,
+          phone: params.phone || cleanId,
           otp_code: code,
           full_name: params.fullName,
-          phone: params.phone,
           role: params.role || 'resident',
         }),
       });
@@ -188,7 +228,7 @@ export async function verifyOtp(params: {
           id: data.user.id,
           email: data.user.email,
           fullName: data.user.full_name || cleanEmail.split('@')[0],
-          phone: data.user.phone || params.phone || '+91 98765 43210',
+          phone: data.user.phone || params.phone || undefined,
           role: (data.user.role as 'resident' | 'merchant' | 'admin') || 'resident',
           isVerified: true,
           token: data.access_token,
@@ -204,51 +244,18 @@ export async function verifyOtp(params: {
           error: errData?.detail || errData?.message || 'Invalid or expired verification code.',
         };
       }
-    } catch {
-      // Offline fallback
+    } catch (err: any) {
+      return {
+        success: false,
+        error: 'Network error: Unable to connect to verification server. Please try again.',
+      };
     }
   }
 
-  // Offline verification validation
-  const pending = pendingOtpStore.get(cleanEmail);
-  if (!pending) {
-    return {
-      success: false,
-      error: 'No active OTP verification code found for this email. Please request a new code.',
-    };
-  }
-
-  if (Date.now() > pending.expiresAt) {
-    pendingOtpStore.delete(cleanEmail);
-    return {
-      success: false,
-      error: 'Verification code has expired. Please request a new code.',
-    };
-  }
-
-  if (pending.code !== code) {
-    return {
-      success: false,
-      error: 'Invalid verification code. Please enter the correct 6-digit code.',
-    };
-  }
-
-  // Clear matched OTP
-  pendingOtpStore.delete(cleanEmail);
-
-  // Authenticate verified session
-  const fallbackProfile: AuthUserProfile = {
-    id: Date.now(),
-    email: cleanEmail,
-    fullName: params.fullName || cleanEmail.split('@')[0].toUpperCase(),
-    phone: params.phone || '+91 98765 43210',
-    role: params.role || 'resident',
-    isVerified: true,
-    token: `myarea24_token_${Date.now()}`,
-    refreshToken: `myarea24_refresh_${Date.now()}`,
+  return {
+    success: false,
+    error: 'Authentication service is unavailable. Please check your network or try again later.',
   };
-  setAuthSession(fallbackProfile.token!, fallbackProfile.refreshToken, fallbackProfile);
-  return { success: true, user: fallbackProfile };
 }
 
 /**

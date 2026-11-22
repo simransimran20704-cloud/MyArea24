@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1/offers", tags=["Local Offers & Deals"])
 
 
 class OfferCreateRequest(BaseModel):
-    business_id: int
+    business_id: Optional[int] = None
     title: str
     description: Optional[str] = None
     discount_text: str  # e.g., '25% OFF', 'Flat ₹200 Off'
@@ -39,6 +39,16 @@ def list_offers(
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
+    # Normalize parameter types for direct python & test call resilience
+    business_id = int(business_id) if isinstance(business_id, int) or (isinstance(business_id, str) and business_id.isdigit()) else None
+    category = category if isinstance(category, str) else None
+    locality = locality if isinstance(locality, str) else None
+    city = city if isinstance(city, str) else None
+    user_lat = float(user_lat) if isinstance(user_lat, (int, float)) else None
+    user_lon = float(user_lon) if isinstance(user_lon, (int, float)) else None
+    page = page if isinstance(page, int) and page >= 1 else 1
+    page_size = page_size if isinstance(page_size, int) and page_size >= 1 else 20
+
     # Resolve coordinates and canonical city/locality across all 780+ Indian districts
     target_loc = (city or locality or "").strip()
     disp_city = (city or "").strip()
@@ -82,18 +92,35 @@ def list_offers(
     if category:
         query = query.filter(func.lower(Offer.category) == category.strip().lower())
 
-    tokens = [] if business_id is not None else extract_locality_tokens(locality, city)
-    if tokens:
-        token_filters = []
-        for tok in tokens:
-            pattern = f"%{tok.lower()}%"
-            token_filters.append(func.lower(Business.locality).like(pattern))
-            token_filters.append(func.lower(Business.city).like(pattern))
-            token_filters.append(func.lower(Business.address).like(pattern))
-        query = query.filter(or_(*token_filters))
-
     now = datetime.datetime.utcnow()
-    query = query.filter(Offer.valid_until >= now)
+    query = query.filter(
+        Offer.valid_until >= now,
+        or_(Offer.valid_from == None, Offer.valid_from <= now)
+    )
+
+    if business_id is None:
+        loc_tokens = extract_locality_tokens(locality or disp_locality, city or disp_city)
+        broad_regions = {"delhi", "new delhi", "mumbai", "india", "local area", "all", "select your area (india)"}
+        token_clauses = []
+        for tok in loc_tokens:
+            if len(tok) >= 3 and tok.lower() not in broad_regions:
+                token_clauses.append(func.lower(Business.locality).like(f"%{tok.lower()}%"))
+                token_clauses.append(func.lower(Business.address).like(f"%{tok.lower()}%"))
+
+        if user_lat is not None and user_lon is not None:
+            rad_lat = math.radians(user_lat)
+            cos_lat = math.cos(rad_lat)
+            cos_lat_sq = cos_lat * cos_lat
+            dist_expr = (
+                (Business.latitude - user_lat) * (Business.latitude - user_lat)
+                + (Business.longitude - user_lon) * (Business.longitude - user_lon) * cos_lat_sq
+            )
+            if token_clauses:
+                query = query.filter(or_(dist_expr <= 0.0035, *token_clauses))
+            else:
+                query = query.filter(dist_expr <= 0.0035)
+        elif token_clauses:
+            query = query.filter(or_(*token_clauses))
 
     if user_lat is not None and user_lon is not None:
         rad_lat = math.radians(user_lat)
@@ -108,33 +135,8 @@ def list_offers(
         query = query.order_by(Offer.created_at.desc())
 
     total = query.count()
-    if total == 0 and (locality or city):
-        fallback_q = (
-            db.query(Offer)
-            .join(Business, Offer.business_id == Business.id)
-            .filter(Offer.is_active == True, Business.status == "active", Offer.valid_until >= now)
-        )
-        if category:
-            fallback_q = fallback_q.filter(func.lower(Offer.category) == category.strip().lower())
-
-        if user_lat is not None and user_lon is not None:
-            rad_lat = math.radians(user_lat)
-            cos_lat = math.cos(rad_lat)
-            cos_lat_sq = cos_lat * cos_lat
-            dist_expr = (
-                (Business.latitude - user_lat) * (Business.latitude - user_lat)
-                + (Business.longitude - user_lon) * (Business.longitude - user_lon) * cos_lat_sq
-            )
-            fallback_q = fallback_q.order_by(dist_expr.asc(), Offer.created_at.desc())
-        else:
-            fallback_q = fallback_q.order_by(Offer.created_at.desc())
-
-        total = fallback_q.count()
-        start = (page - 1) * page_size
-        items = fallback_q.offset(start).limit(page_size).all()
-    else:
-        start = (page - 1) * page_size
-        items = query.offset(start).limit(page_size).all()
+    start = (page - 1) * page_size
+    items = query.offset(start).limit(page_size).all()
 
     results = []
     for o in items:
@@ -219,7 +221,15 @@ def create_offer(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    business = db.query(Business).filter(Business.id == req.business_id).first()
+    target_biz_id = req.business_id
+    if not target_biz_id:
+        user_biz = db.query(Business).filter(Business.owner_id == user.id).first()
+        if user_biz:
+            target_biz_id = user_biz.id
+        else:
+            raise HTTPException(status_code=400, detail="business_id required or user must own a registered business")
+
+    business = db.query(Business).filter(Business.id == target_biz_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
@@ -228,7 +238,7 @@ def create_offer(
 
     valid_until = datetime.datetime.utcnow() + datetime.timedelta(days=req.valid_days)
     offer = Offer(
-        business_id=req.business_id,
+        business_id=target_biz_id,
         title=req.title.strip(),
         description=req.description.strip() if req.description else None,
         discount_text=req.discount_text.strip(),

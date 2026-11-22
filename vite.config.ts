@@ -14,10 +14,17 @@ export default defineConfig({
         ws: true,
         configure: (proxy) => {
           proxy.on('error', (_err, _req, res) => {
-            if (!res.headersSent && typeof res.writeHead === 'function') {
+            if (res && !res.headersSent && typeof res.writeHead === 'function') {
               res.writeHead(503, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Backend offline', status: 503 }));
             }
+          });
+          proxy.on('proxyReqWsError', (_err, _req, socket) => {
+            try {
+              if (socket && !socket.destroyed) {
+                socket.destroy();
+              }
+            } catch {}
           });
         },
       },
@@ -49,9 +56,6 @@ export default defineConfig({
           }
           if (id.includes('src/dashboards/CommunityDashboards') || id.includes('src\\dashboards\\CommunityDashboards')) {
             return 'dashboards-community';
-          }
-          if (id.includes('src/components/MobileAppView') || id.includes('src\\components\\MobileAppView')) {
-            return 'mobile-app-view';
           }
         },
       },

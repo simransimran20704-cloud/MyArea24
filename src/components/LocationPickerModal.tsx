@@ -17,6 +17,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { reverseGeocodeLive, searchLocationsLive } from '../services/liveIntelligence';
+import { INDIAN_LOCATIONS_HIERARCHY } from '../data/indianLocationsHierarchy';
 import { DEFAULT_SAVED_LOCATIONS, type UserLocation } from '../types';
 export { DEFAULT_SAVED_LOCATIONS, type UserLocation };
 
@@ -39,6 +40,9 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [liveResults, setLiveResults] = useState<UserLocation[]>([]);
   const [searchingLive, setSearchingLive] = useState(false);
+  const [activeTab, setActiveTab] = useState<'search' | 'hierarchy'>('search');
+  const [selectedStateIndex, setSelectedStateIndex] = useState<number>(0);
+  const [selectedDistrictIndex, setSelectedDistrictIndex] = useState<number>(0);
 
   // User-created Saved Addresses only — never fake pre-populated addresses!
   const [savedLocations, setSavedLocations] = useState<UserLocation[]>(() => {
@@ -166,12 +170,25 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
           handleSelect(resolved);
         } catch {
           setDetectingGps(false);
+          let nearestLoc = { name: 'Connaught Place', district: 'New Delhi', state: 'Delhi', pincode: '110001' };
+          let minDist = Infinity;
+          for (const s of INDIAN_LOCATIONS_HIERARCHY) {
+            for (const d of s.districts) {
+              for (const l of d.localities) {
+                const dist = Math.hypot(pos.coords.latitude - l.lat, pos.coords.longitude - l.lng);
+                if (dist < minDist) {
+                  minDist = dist;
+                  nearestLoc = { name: l.name, district: d.district, state: s.state, pincode: l.pincode };
+                }
+              }
+            }
+          }
           const fallbackGps: UserLocation = {
             id: `loc-gps-${Date.now()}`,
-            label: 'Current Location',
-            areaName: `Location (${pos.coords.latitude.toFixed(3)}°N, ${pos.coords.longitude.toFixed(3)}°E)`,
-            fullAddress: `Detected via device GPS at coordinates ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`,
-            pincode: '',
+            label: nearestLoc.name,
+            areaName: `${nearestLoc.name}, ${nearestLoc.district}`,
+            fullAddress: `${nearestLoc.name}, ${nearestLoc.district}, ${nearestLoc.state} - ${nearestLoc.pincode}`,
+            pincode: nearestLoc.pincode,
             coords: { lat: pos.coords.latitude, lng: pos.coords.longitude },
           };
           handleSelect(fallbackGps);
@@ -249,6 +266,34 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
           </button>
         </div>
 
+        {/* Mode Switcher: Instant Search vs Smart Hierarchy */}
+        <div className="flex border-b border-slate-200 bg-slate-100 p-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab('search')}
+            className={`flex-1 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+              activeTab === 'search'
+                ? 'bg-white text-indigo-600 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Search className="w-3.5 h-3.5" />
+            <span>Search & GPS</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('hierarchy')}
+            className={`flex-1 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+              activeTab === 'hierarchy'
+                ? 'bg-white text-indigo-600 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Smart Selector (India → State → Area)</span>
+          </button>
+        </div>
+
         {/* Search Input Bar (Real-world Pan-India Search) */}
         <div className="p-4 border-b border-slate-100 bg-slate-50/60">
           <div className="bg-white border-2 border-indigo-500/80 focus-within:border-indigo-600 rounded-xl px-3.5 py-2.5 flex items-center gap-2.5 shadow-xs">
@@ -298,7 +343,7 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
                 <p className="text-[11px] text-slate-500">
                   {currentLocation.coords && currentLocation.areaName !== 'Select Your Area (India)'
                     ? `Current: ${currentLocation.areaName}`
-                    : 'Auto-detect exact coordinates via device GPS anywhere in India'}
+                    : 'Auto-detect exact location via device GPS anywhere in India'}
                 </p>
               </div>
             </div>
@@ -314,8 +359,126 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-5">
-          {/* Live Search Results Mode */}
-          {searchQuery.trim().length >= 2 ? (
+          {activeTab === 'hierarchy' && (
+            <div className="space-y-4">
+              <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-2xl flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2 font-black text-indigo-950">
+                  <span className="text-base">🇮🇳</span>
+                  <span>India</span>
+                  <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="text-indigo-600">
+                    {INDIAN_LOCATIONS_HIERARCHY[selectedStateIndex]?.state}
+                  </span>
+                  <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="text-slate-700">
+                    {INDIAN_LOCATIONS_HIERARCHY[selectedStateIndex]?.districts[selectedDistrictIndex]?.district}
+                  </span>
+                </div>
+              </div>
+
+              {/* Step 1: State / UT */}
+              <div>
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 mb-2">
+                  1. Select State / Territory
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {INDIAN_LOCATIONS_HIERARCHY.map((st, idx) => (
+                    <button
+                      key={st.state}
+                      type="button"
+                      onClick={() => {
+                        setSelectedStateIndex(idx);
+                        setSelectedDistrictIndex(0);
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                        selectedStateIndex === idx
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      {st.state}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Step 2: District / Region */}
+              <div>
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 mb-2">
+                  2. Select District / Zone
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {INDIAN_LOCATIONS_HIERARCHY[selectedStateIndex]?.districts.map((dst, idx) => (
+                    <button
+                      key={dst.district}
+                      type="button"
+                      onClick={() => setSelectedDistrictIndex(idx)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                        selectedDistrictIndex === idx
+                          ? 'bg-slate-900 text-white shadow-xs'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      {dst.district}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Step 3: Localities in this district */}
+              <div>
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 mb-2">
+                  3. Select Exact Locality / Neighborhood
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {INDIAN_LOCATIONS_HIERARCHY[selectedStateIndex]?.districts[selectedDistrictIndex]?.localities.map(
+                    (loc) => {
+                      const curState = INDIAN_LOCATIONS_HIERARCHY[selectedStateIndex];
+                      const curDist = curState.districts[selectedDistrictIndex];
+                      const isCurrent = currentLocation.areaName.includes(loc.name);
+                      return (
+                        <div
+                          key={loc.name}
+                          onClick={() => {
+                            const selected: UserLocation = {
+                              id: `hier-${loc.pincode}-${loc.name.toLowerCase().replace(/\s+/g, '-')}`,
+                              label: loc.name,
+                              areaName: `${loc.name}, ${curDist.district}`,
+                              fullAddress: `${loc.name}, ${curDist.district}, ${curState.state} - ${loc.pincode}`,
+                              pincode: loc.pincode,
+                              coords: { lat: loc.lat, lng: loc.lng },
+                            };
+                            handleSelect(selected);
+                          }}
+                          className={`p-2.5 rounded-xl border flex items-center justify-between text-left transition cursor-pointer ${
+                            isCurrent
+                              ? 'bg-indigo-50 border-indigo-300 text-indigo-900 font-bold'
+                              : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <MapPin className="w-3.5 h-3.5 text-indigo-600" />
+                              <span className="text-xs font-bold">{loc.name}</span>
+                            </div>
+                            <span className="text-[10px] text-slate-500 font-mono ml-5">
+                              PIN {loc.pincode}
+                            </span>
+                          </div>
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                        </div>
+                      );
+                    }
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'search' && (
+            <>
+              {/* Live Search Results Mode */}
+              {searchQuery.trim().length >= 2 ? (
             <div>
               <div className="flex items-center justify-between mb-2.5">
                 <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
@@ -346,14 +509,15 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
-                              <p className="text-xs font-bold text-slate-900 truncate">{area.areaName}</p>
+                              <p className="text-xs font-bold text-slate-900 truncate">{area.label}</p>
                               {area.pincode && (
                                 <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-slate-100 text-slate-500 shrink-0">
                                   {area.pincode}
                                 </span>
                               )}
                             </div>
-                            <p className="text-[11px] text-slate-500 truncate">{area.fullAddress}</p>
+                            <p className="text-[11px] text-slate-500 truncate">{area.areaName}</p>
+                            <p className="text-[10px] text-slate-400 truncate">{area.fullAddress}</p>
                           </div>
                         </div>
                         <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
@@ -593,7 +757,9 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
               )}
             </>
           )}
-        </div>
+        </>
+      )}
+    </div>
       </div>
     </div>
   );

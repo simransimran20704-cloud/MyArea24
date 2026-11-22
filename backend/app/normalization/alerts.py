@@ -1,7 +1,10 @@
 import datetime
 from typing import Any, Dict, List, Optional
 from dateutil import parser as dt_parser
-from defusedxml import ElementTree as ET
+try:
+    from defusedxml import ElementTree as ET
+except ImportError:
+    from xml.etree import ElementTree as ET
 from pydantic import BaseModel, Field
 
 

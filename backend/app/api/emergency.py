@@ -59,15 +59,11 @@ def get_emergency_facilities(
     if facility_type and facility_type.strip():
         query = query.filter(EmergencyFacility.facility_type.ilike(f"%{facility_type.strip()}%"))
 
-    # Auto-sync real live facilities around coordinates if DB results are low
+    # Auto-sync real live facilities around coordinates if DB results are low (using spatial index)
     if latitude is not None and longitude is not None:
         try:
-            # Check if there are at least 4 facilities within 15 km
-            nearby_count = db.query(EmergencyFacility).filter(
-                (EmergencyFacility.latitude - latitude) * (EmergencyFacility.latitude - latitude)
-                + (EmergencyFacility.longitude - longitude) * (EmergencyFacility.longitude - longitude) <= 0.04
-            ).count()
-            if nearby_count < 4:
+            nearby_list = EmergencyFacility.query_nearby(db, latitude, longitude, radius_km=15.0, limit=4)
+            if len(nearby_list) < 4:
                 sync_live_emergency_facilities(db, latitude, longitude, city or locality, state)
         except Exception:
             pass
@@ -149,4 +145,222 @@ def get_emergency_facilities(
             {"name": "Delhi-Meerut Expressway Helpline", "route": "Delhi – Meerut Corridor", "phone": "1033"},
         ],
         "facilities": sliced,
+    }
+
+
+# ==============================================================================
+# NATIONAL HOSPITAL DIRECTORY (MoHFW / NIHFW - data.gov.in)
+# OGD Resource ID: 98fa254e-c5f8-4910-a19b-4828939b477d
+# ==============================================================================
+
+hospitals_router = APIRouter(prefix="/api/v1/hospitals", tags=["National Hospital Directory (NIHFW)"])
+
+
+@hospitals_router.get("/filter-options", response_model=Dict[str, Any])
+@router.get("/hospitals/filter-options", response_model=Dict[str, Any])
+def get_hospital_filter_options(
+    state: Optional[str] = Query(None, description="Optional state filter for dependent districts"),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns available states, districts, care_types, and discipline systems
+    from the verified National Hospital Directory.
+    """
+    from backend.app.database.models import HospitalDirectory
+
+    s_state = state.strip() if isinstance(state, str) and state.strip() else None
+
+    states = sorted([s[0] for s in db.query(HospitalDirectory.state).distinct().all() if s[0]])
+    
+    dist_q = db.query(HospitalDirectory.district).distinct()
+    if s_state and s_state.lower() not in ("all", "all india", "india"):
+        dist_q = dist_q.filter(HospitalDirectory.state.ilike(f"%{s_state}%"))
+    districts = sorted([d[0] for d in dist_q.all() if d[0]])
+
+    care_types = sorted([c[0] for c in db.query(HospitalDirectory.care_type).distinct().all() if c[0]])
+    systems = sorted([s[0] for s in db.query(HospitalDirectory.discipline_system).distinct().all() if s[0]])
+
+    return {
+        "states": states,
+        "districts": districts,
+        "care_types": care_types,
+        "systems": systems,
+        "total_records": db.query(HospitalDirectory).count(),
+        "source": "Verified National Healthcare Network",
+        "registry_id": "central-healthcare-registry",
+    }
+
+
+@hospitals_router.get("/directory", response_model=Dict[str, Any])
+@router.get("/hospitals/directory", response_model=Dict[str, Any])
+def get_hospital_directory(
+    state: Optional[str] = Query(None, description="State filter"),
+    district: Optional[str] = Query(None, description="District filter"),
+    care_type: Optional[str] = Query(None, description="Care type filter (Hospital, Community Health Centre, etc.)"),
+    system: Optional[str] = Query(None, description="Discipline system (Allopathic, AYUSH)"),
+    search: Optional[str] = Query(None, description="Search hospital name, address, or locality"),
+    pincode: Optional[str] = Query(None, description="PIN code filter"),
+    has_emergency_only: bool = Query(False, description="Filter only facilities with 24/7 emergency care"),
+    has_bloodbank_only: bool = Query(False, description="Filter only facilities with operational blood bank"),
+    has_ambulance_only: bool = Query(False, description="Filter only facilities with operational ambulance"),
+    lat: Optional[float] = Query(None, description="User latitude for distance calculation"),
+    lon: Optional[float] = Query(None, description="User longitude for distance calculation"),
+    radius_km: float = Query(35.0, ge=1.0, le=100.0),
+    sort_by: str = Query("nearest", description="'nearest', 'name_asc', 'beds_desc'"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(25, ge=1, le=100),
+    sync_live: bool = Query(False, description="Sync fresh records from data.gov.in if true"),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns verified hospitals from the National Hospital Directory with contact details,
+    bed counts, emergency availability, and turn-by-turn navigation links.
+    """
+    from backend.app.database.models import HospitalDirectory
+    from backend.app.integrations.health.hospital_client import hospital_client
+    from backend.app.intelligence.rules import haversine_distance_km
+
+    s_state = state.strip() if isinstance(state, str) and state.strip() else None
+    s_district = district.strip() if isinstance(district, str) and district.strip() else None
+    s_care = care_type.strip() if isinstance(care_type, str) and care_type.strip() else None
+    s_system = system.strip() if isinstance(system, str) and system.strip() else None
+    s_search = search.strip() if isinstance(search, str) and search.strip() else None
+    s_pincode = pincode.strip() if isinstance(pincode, str) and pincode.strip() else None
+    s_sync = bool(sync_live) if isinstance(sync_live, bool) else False
+
+    if s_sync and s_state:
+        try:
+            hospital_client.sync_to_database(db, state=s_state, district=s_district, limit=limit)
+        except Exception as e:
+            logger.warning(f"[hospitals_api] Sync notice: {e}")
+
+    query = db.query(HospitalDirectory)
+
+    if s_state and s_state.lower() not in ("all", "all india", "india"):
+        query = query.filter(HospitalDirectory.state.ilike(f"%{s_state}%"))
+
+    if s_district and s_district.lower() not in ("all", "all districts"):
+        query = query.filter(HospitalDirectory.district.ilike(f"%{s_district}%"))
+
+    if s_care and s_care.lower() != "all":
+        query = query.filter(HospitalDirectory.care_type.ilike(f"%{s_care}%"))
+
+    if s_system and s_system.lower() != "all":
+        query = query.filter(HospitalDirectory.discipline_system.ilike(f"%{s_system}%"))
+
+    if s_pincode:
+        query = query.filter(
+            or_(
+                HospitalDirectory.pincode == s_pincode,
+                HospitalDirectory.address.ilike(f"%{s_pincode}%"),
+            )
+        )
+
+    if has_emergency_only:
+        query = query.filter(HospitalDirectory.has_emergency == True)
+
+    if has_bloodbank_only:
+        query = query.filter(HospitalDirectory.has_bloodbank == True)
+
+    if has_ambulance_only:
+        query = query.filter(HospitalDirectory.has_ambulance == True)
+
+    if s_search:
+        term = f"%{s_search.lower()}%"
+        query = query.filter(
+            or_(
+                HospitalDirectory.hospital_name.ilike(term),
+                HospitalDirectory.address.ilike(term),
+                HospitalDirectory.district.ilike(term),
+                HospitalDirectory.location.ilike(term),
+                HospitalDirectory.specialties.ilike(term),
+            )
+        )
+
+    all_matches = query.all()
+
+    user_coords = lat is not None and lon is not None
+    hospitals_with_distance = []
+
+    for h in all_matches:
+        dist_km = None
+        if user_coords and h.latitude and h.longitude:
+            try:
+                dist_km = round(haversine_distance_km(lat, lon, h.latitude, h.longitude), 2)
+            except Exception:
+                dist_km = None
+
+        if user_coords and dist_km is not None and dist_km > radius_km:
+            continue
+
+        primary_contact = h.emergency_num or h.mobile_number or h.telephone or h.ambulance_phone or "108 / 112"
+        maps_link = (
+            f"https://maps.google.com/maps?q={h.latitude},{h.longitude}"
+            if h.latitude and h.longitude
+            else f"https://maps.google.com/maps?q={h.hospital_name}+{h.district or ''}"
+        )
+
+        hospitals_with_distance.append({
+            "id": h.id,
+            "sr_no": h.sr_no,
+            "hospital_name": h.hospital_name,
+            "care_type": h.care_type or "Hospital",
+            "discipline_system": h.discipline_system or "Allopathic",
+            "hospital_category": h.hospital_category,
+            "state": h.state,
+            "district": h.district,
+            "subdistrict": h.subdistrict,
+            "pincode": h.pincode,
+            "address": h.address or f"{h.district}, {h.state}",
+            "location": h.location,
+            "latitude": h.latitude,
+            "longitude": h.longitude,
+            "distance_km": dist_km,
+            "distance_text": f"{dist_km:.1f} km away" if dist_km is not None else "Distance unavailable",
+            "telephone": h.telephone,
+            "mobile_number": h.mobile_number,
+            "emergency_num": h.emergency_num,
+            "ambulance_phone": h.ambulance_phone,
+            "bloodbank_phone": h.bloodbank_phone,
+            "primary_phone": primary_contact,
+            "tollfree": h.tollfree,
+            "helpline": h.helpline,
+            "email": h.email,
+            "website": h.website,
+            "specialties": h.specialties,
+            "facilities": h.facilities,
+            "accreditation": h.accreditation,
+            "total_beds": h.total_beds,
+            "has_emergency": h.has_emergency,
+            "has_bloodbank": h.has_bloodbank,
+            "has_ambulance": h.has_ambulance,
+            "direction_link": maps_link,
+            "source_name": h.source_name,
+            "ogd_resource_id": h.resource_id,
+        })
+
+    # Sorting
+    s = (sort_by or "nearest").lower().strip()
+    if s == "beds_desc":
+        hospitals_with_distance.sort(key=lambda x: x["total_beds"], reverse=True)
+    elif s == "name_asc":
+        hospitals_with_distance.sort(key=lambda x: x["hospital_name"].lower())
+    else:  # nearest
+        if user_coords:
+            hospitals_with_distance.sort(key=lambda x: (x["distance_km"] is None, x["distance_km"] or 9999))
+        else:
+            hospitals_with_distance.sort(key=lambda x: x["hospital_name"].lower())
+
+    total = len(hospitals_with_distance)
+    start_idx = (page - 1) * limit
+    paginated = hospitals_with_distance[start_idx : start_idx + limit]
+
+    return {
+        "module": "National Hospital & Emergency Directory",
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "hospitals": paginated,
+        "source": "Verified National Healthcare Network",
+        "registry_id": "central-healthcare-registry",
     }

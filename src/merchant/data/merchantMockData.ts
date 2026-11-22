@@ -28,7 +28,7 @@ export const EMPTY_MERCHANT_STOREFRONT: MerchantBusinessInfo = {
   phone: '',
   email: '',
   website: '',
-  rating: 5.0,
+  rating: 0,
   reviewCount: 0,
   verificationStatus: 'Under Review',
   submissionDate: new Date().toLocaleDateString('en-IN', {
@@ -40,9 +40,6 @@ export const EMPTY_MERCHANT_STOREFRONT: MerchantBusinessInfo = {
   logo: '',
   coverImage: '',
 };
-
-export const DEFAULT_BUSINESS_THE_DAILY_BREW: MerchantBusinessInfo = EMPTY_MERCHANT_STOREFRONT;
-export const DEFAULT_BUSINESS_SHARMA_FUEL: MerchantBusinessInfo = EMPTY_MERCHANT_STOREFRONT;
 
 export const INITIAL_MERCHANT_PRODUCTS: MerchantProductItem[] = [];
 export const INITIAL_MERCHANT_SERVICES: MerchantServiceItem[] = [];

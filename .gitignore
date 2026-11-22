@@ -6,16 +6,22 @@ dist/
 .env.*
 !.env.example
 !.env.staging.example
-backups/*.db
-backups/*.json
+backups/
+static/uploads/
 __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
 myarea24.db*
-MyArea24-VisualGuide - Google Docs.pdf
-MyArea24_Pitch_Deck.pptx
+*.db
+*.db-shm
+*.db-wal
+scratch/
+*.pdf
+*.pptx
 
 .neon
 api_audit_results.json
 audit_results.json
+
+.vercel

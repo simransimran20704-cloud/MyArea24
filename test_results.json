@@ -1,0 +1,243 @@
+[
+  {
+    "test": "Fuel Latest",
+    "url": "http://127.0.0.1:8000/api/v1/fuel/latest",
+    "status": 200,
+    "latency_ms": 281.6,
+    "success": true,
+    "summary": {
+      "keys": [
+        "success",
+        "source_date",
+        "source_posted_date",
+        "attribution",
+        "latest_fetched_at",
+        "prices"
+      ],
+      "sample": "{'success': True, 'source_date': '2026-10-30', 'source_posted_date': '2026-10-30', 'attribution': 'Source: Petroleum Planning & Analysis Cell (PPAC), Ministry o..."
+    }
+  },
+  {
+    "test": "Fuel Cities",
+    "url": "http://127.0.0.1:8000/api/v1/fuel/cities",
+    "status": 200,
+    "latency_ms": 1585.6,
+    "success": true,
+    "summary": {
+      "keys": [
+        "success",
+        "total",
+        "cities"
+      ],
+      "sample": "{'success': True, 'total': 4, 'cities': [{'slug': 'delhi', 'name': 'Delhi'}, {'slug': 'mumbai', 'name': 'Mumbai'}, {'slug': 'chennai', 'name': 'Chennai'}, {'slu..."
+    }
+  },
+  {
+    "test": "Fuel Stations (OSM Overpass)",
+    "url": "http://127.0.0.1:8000/api/v1/fuel/stations?lat=28.6139&lon=77.209&radius=3000",
+    "status": 200,
+    "latency_ms": 68.5,
+    "success": true,
+    "summary": {
+      "keys": [
+        "success",
+        "area",
+        "city",
+        "center",
+        "radius_km",
+        "filter",
+        "total",
+        "cached",
+        "stations",
+        "attribution"
+      ],
+      "sample": "{'success': True, 'area': 'Local Area', 'city': 'Local', 'center': {'lat': 28.6139, 'lon': 77.209}, 'radius_km': 5.0, 'filter': 'all', 'total': 28, 'cached': Tr..."
+    }
+  },
+  {
+    "test": "Mandi Rates (India/All)",
+    "url": "http://127.0.0.1:8000/api/v1/market/rates?city=Local&state=India",
+    "status": 200,
+    "latency_ms": 49.1,
+    "success": true,
+    "summary": {
+      "keys": [
+        "total",
+        "items",
+        "matched_mandi",
+        "matched_state",
+        "matched_district",
+        "attribution"
+      ],
+      "sample": "{'total': 103, 'items': [{'id': 6, 'commodity': 'Apple (\u0938\u0947\u092c)', 'variety': 'Kashmiri Royal Delicious', 'category': 'Fruits', 'mandi': 'Azadpur APMC Mandi, Delhi'..."
+    }
+  },
+  {
+    "test": "Mandi Rates (Delhi)",
+    "url": "http://127.0.0.1:8000/api/v1/market/rates?city=Delhi&state=Delhi",
+    "status": 200,
+    "latency_ms": 12.8,
+    "success": true,
+    "summary": {
+      "keys": [
+        "total",
+        "items",
+        "matched_mandi",
+        "matched_state",
+        "matched_district",
+        "attribution"
+      ],
+      "sample": "{'total': 15, 'items': [{'id': 6, 'commodity': 'Apple (\u0938\u0947\u092c)', 'variety': 'Kashmiri Royal Delicious', 'category': 'Fruits', 'mandi': 'Azadpur APMC Mandi, Delhi',..."
+    }
+  },
+  {
+    "test": "Mandi Rates (UP)",
+    "url": "http://127.0.0.1:8000/api/v1/market/rates?city=Lucknow&state=Uttar%20Pradesh",
+    "status": 200,
+    "latency_ms": 11.1,
+    "success": true,
+    "summary": {
+      "keys": [
+        "total",
+        "items",
+        "matched_mandi",
+        "matched_state",
+        "matched_district",
+        "attribution"
+      ],
+      "sample": "{'total': 21, 'items': [{'id': 29, 'commodity': 'Arhar / Toor Dal (\u0905\u0930\u0939\u0930 \u0926\u093e\u0932)', 'variety': 'Desi Fatka', 'category': 'Grains & Pulses', 'mandi': 'Naveen Galla Ma..."
+    }
+  },
+  {
+    "test": "Places Nearby POIs",
+    "url": "http://127.0.0.1:8000/api/v1/locations/places-nearby?lat=28.6139&lon=77.209&radius=4500",
+    "status": "ERROR",
+    "latency_ms": 10016.4,
+    "success": false,
+    "error": "timed out"
+  },
+  {
+    "test": "Intelligence Snapshot",
+    "url": "http://127.0.0.1:8000/api/v1/intelligence/snapshot?area=Select%20Your%20Area%20(India)&city=Local&state=India&lat=28.6139&lon=77.209",
+    "status": 200,
+    "latency_ms": 40.8,
+    "success": true,
+    "summary": {
+      "keys": [
+        "area",
+        "city",
+        "state",
+        "weather",
+        "air_quality",
+        "traffic",
+        "fuel",
+        "top_alert",
+        "active_community_signals",
+        "is_simulated",
+        "cached",
+        "timestamp"
+      ],
+      "sample": "{'area': 'Select Your Area (India)', 'city': 'Local', 'state': 'India', 'weather': {'is_available': True, 'is_simulated': False, 'location_name': 'Delhi AIIMS R..."
+    }
+  },
+  {
+    "test": "Weather Telemetry",
+    "url": "http://127.0.0.1:8000/api/v1/intelligence/weather?lat=28.6139&lon=77.209",
+    "status": 200,
+    "latency_ms": 13.7,
+    "success": true,
+    "summary": {
+      "keys": [
+        "is_available",
+        "is_simulated",
+        "location_name",
+        "latitude",
+        "longitude",
+        "temperature_c",
+        "precipitation_mm",
+        "condition_text",
+        "wind_kph",
+        "humidity",
+        "observed_at",
+        "source",
+        "message",
+        "waterlogging_risk_index",
+        "transit_delay_estimate_min",
+        "outdoor_activity_advice",
+        "travel_impact",
+        "event_impact",
+        "activity_consideration"
+      ],
+      "sample": "{'is_available': True, 'is_simulated': False, 'location_name': 'Delhi AIIMS Ring Road', 'latitude': 28.6, 'longitude': 77.2, 'temperature_c': 22.6, 'precipitati..."
+    }
+  },
+  {
+    "test": "Air Quality Telemetry",
+    "url": "http://127.0.0.1:8000/api/v1/intelligence/air-quality?lat=28.6139&lon=77.209",
+    "status": 200,
+    "latency_ms": 40.5,
+    "success": true,
+    "summary": {
+      "keys": [
+        "is_available",
+        "status",
+        "is_simulated",
+        "station_id",
+        "station_name",
+        "city",
+        "distance_km",
+        "aqi_value",
+        "aqi_category",
+        "prominent_pollutant",
+        "pm25",
+        "pm10",
+        "no2",
+        "so2",
+        "co",
+        "o3",
+        "observed_at",
+        "is_stale",
+        "attribution",
+        "message"
+      ],
+      "sample": "{'is_available': True, 'status': 'ACTIVE', 'is_simulated': False, 'station_id': 'WAPI-28.61-77.21', 'station_name': 'Delhi Paharganj Ambient Air Monitoring Grid..."
+    }
+  },
+  {
+    "test": "Traffic Incidents",
+    "url": "http://127.0.0.1:8000/api/v1/intelligence/traffic?lat=28.6139&lon=77.209&limit=10",
+    "status": 200,
+    "latency_ms": 14.0,
+    "success": true,
+    "summary": {
+      "keys": [
+        "is_available",
+        "is_simulated",
+        "total_incidents",
+        "area",
+        "incidents",
+        "source",
+        "message",
+        "cumulative_delay_minutes",
+        "worst_corridor",
+        "congestion_level"
+      ],
+      "sample": "{'is_available': True, 'is_simulated': False, 'total_incidents': 100, 'area': 'Location (28.6139, 77.2090)', 'incidents': [{'id': 11980, 'incident_type': 'CONGE..."
+    }
+  },
+  {
+    "test": "Civic Bulletins",
+    "url": "http://127.0.0.1:8000/api/v1/bulletins?limit=10",
+    "status": 200,
+    "latency_ms": 27.0,
+    "success": true,
+    "summary": {
+      "keys": [
+        "total",
+        "items",
+        "policy"
+      ],
+      "sample": "{'total': 19, 'items': [{'id': 15, 'title': 'PMC Hinjawadi Metro Line 3 Arterial Lane Restructuring', 'summary': 'Pune Municipal Corporation and Traffic Branch ..."
+    }
+  }
+]

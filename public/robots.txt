@@ -4,4 +4,9 @@ Allow: /
 Disallow: /merchant
 Disallow: /api/
 
+# Sitemaps
+Sitemap: https://myarea24.com/sitemap.xml
 Sitemap: https://aidivi265.github.io/myarea24-frontend/sitemap.xml
+
+# LLM Information Standard (llms.txt)
+# https://myarea24.com/llms.txt
