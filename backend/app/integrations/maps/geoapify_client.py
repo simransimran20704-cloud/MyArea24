@@ -76,7 +76,7 @@ class GeoapifyClient:
     }
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = (api_key or getattr(settings, "GEOAPIFY_API_KEY", "") or "").strip()
+        self.api_key = (api_key or getattr(settings, "GEOAPIFY_API_KEY", "") or "9bcdddc84c814376a6238ec878a28af8").strip()
         self.base_url = getattr(settings, "GEOAPIFY_BASE_URL", "https://api.geoapify.com/v2")
         self.timeout = 8.0
 

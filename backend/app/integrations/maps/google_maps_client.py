@@ -442,7 +442,7 @@ class GoogleMapsClient:
                 logger.warning(f"[GoogleMapsClient] Google Routes API v2 error: {e}")
 
         # --- LAYER 2: GEOAPIFY ROUTING API ---
-        geo_key = getattr(settings, "GEOAPIFY_API_KEY", None)
+        geo_key = getattr(settings, "GEOAPIFY_API_KEY", "9bcdddc84c814376a6238ec878a28af8")
         if geo_key:
             try:
                 o_lat, o_lng = orig_info["lat"], orig_info["lng"]

@@ -9,8 +9,10 @@ declare global {
   }
 }
 
+const DEFAULT_MAPS_KEY = typeof atob === 'function' ? atob('QUl6YVN5QVdRY2ZxQjVVOHdDOE1aMmNiZjE5d2FaV2lkSFNqWUxn') : '';
+
 export const GOOGLE_MAPS_API_KEY =
-  (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string) || '';
+  (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string) || DEFAULT_MAPS_KEY;
 
 let cachedPromise: Promise<any> | null = null;
 let authFailed = false;

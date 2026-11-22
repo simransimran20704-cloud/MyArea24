@@ -37,7 +37,7 @@ class GpmResidentialClient:
     CACHE_TTL: int = 3600
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or getattr(settings, "GPM_API_KEY", None)
+        self.api_key = api_key or getattr(settings, "GPM_API_KEY", "gpm_free_f8d5699465_3mHU52i7gQCm447ApzL12hxCzBIS1jmw")
         self.base_url = getattr(settings, "GPM_API_BASE_URL", self.BASE_URL).rstrip("/")
         self.headers = {
             "X-API-Key": self.api_key,
